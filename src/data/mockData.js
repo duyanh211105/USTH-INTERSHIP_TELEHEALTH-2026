@@ -1,0 +1,10 @@
+export const doctors = [];
+export const patient = null;
+export const appointments = [];
+export const medicalRecords = [];
+export const symptomSummary = null;
+export const consultationResult = null;
+export const adminMetrics = null;
+export const roleBreakdown = [];
+export const consultationHistory = [];
+export const chatbotQuestions = [];

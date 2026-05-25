@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+server/node_modules/
+
+# Build and coverage output
+dist/
+coverage/
+
+# Environment and secrets
+.env
+.env.local
+.env.*.local
+server/.env
+server/.env.local
+server/.env.*.local
+!.env.example
+!server/.env.example
+
+# Logs and temporary runtime files
+*.log
+*.tmp
+*.temp
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Runtime uploads and local databases
+uploads/
+server/uploads/
+server/server/uploads/
+server/data/
+server/server/data/
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Local PostgreSQL development cluster
+server/postgres-data/
+server/postgres.log
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
