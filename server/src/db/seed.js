@@ -27,7 +27,7 @@ const demoUsers = [
     name: 'Morgan Lee',
     email: 'admin@example.com',
     role: 'admin',
-    phone: '0900000003',
+    phone: '0123456789',
     nationalId: null,
     permanentAddress: '',
   },
@@ -65,15 +65,25 @@ export async function seedDatabase() {
   }
 
   await db.prepare(`
-    INSERT INTO doctor_profiles (user_id, specialty, bio, availability, availability_summary, consultation_fee, rating, patients_count)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO doctor_profiles (
+      user_id, specialty, bio, availability, availability_summary, consultation_fee,
+      qualification_title, years_of_experience, gender, languages_spoken,
+      rating, average_rating, review_count, patients_count
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(user_id) DO UPDATE SET
       specialty = excluded.specialty,
       bio = excluded.bio,
       availability = excluded.availability,
       availability_summary = excluded.availability_summary,
       consultation_fee = excluded.consultation_fee,
+      qualification_title = excluded.qualification_title,
+      years_of_experience = excluded.years_of_experience,
+      gender = excluded.gender,
+      languages_spoken = excluded.languages_spoken,
       rating = excluded.rating,
+      average_rating = excluded.average_rating,
+      review_count = excluded.review_count,
       patients_count = excluded.patients_count
   `).run(
     ids.doctor,
@@ -82,7 +92,13 @@ export async function seedDatabase() {
     'Mon-Fri, 9:00 AM - 5:00 PM',
     'Mon-Fri, 9:00 AM - 5:00 PM',
     35,
+    'SPECIALIST_LEVEL_II',
+    12,
+    'Male',
+    'Vietnamese, English',
     4.9,
+    4.9,
+    327,
     1240,
   );
 

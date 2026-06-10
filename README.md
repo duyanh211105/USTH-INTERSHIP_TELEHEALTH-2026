@@ -7,7 +7,7 @@ MediConnect is a full-stack MVP for remote healthcare consultation, appointment 
 ### Patient
 - Register and log in with real database accounts.
 - Use a rule-based symptom chatbot to collect structured symptom summaries.
-- Search doctors by specialty, name, fee range, and availability date.
+- Search doctors with normalized specialty filters, name keyword search, fee range, availability date, available-today, video availability, and sorting.
 - Book appointments from generated available doctor slots.
 - Upload medical documents as PDF, JPG, or PNG.
 - Preview uploaded images and open/download PDFs.
@@ -291,6 +291,22 @@ Main API groups:
 - `POST /admin/doctors`
 - `GET /admin/audit-logs`
 
+### Doctor Search Parameters
+
+`GET /doctors` supports optional query filters for the patient booking workflow:
+
+| Query param | Purpose |
+| --- | --- |
+| `q` | Case-insensitive partial search across doctor name and specialty. |
+| `specialty` | Normalized specialty code such as `CARDIOLOGY`, `PEDIATRICS`, or `GENERAL_MEDICINE`. |
+| `date` | Return doctors with generated available slots on that date. |
+| `availableToday` | Return doctors with available slots today. |
+| `minFee` / `maxFee` | Filter by consultation fee range when provided. |
+| `videoAvailable` | Keep doctors compatible with the MVP video consultation workflow. |
+| `sort` | Supports `lowest_fee`, `highest_fee`, `earliest_availability`, and `highest_rating`. |
+
+Specialties are controlled in the UI and normalized in the backend. Legacy values such as `heart`, `Heart Doctor`, or `tim` map to `CARDIOLOGY`, which keeps filtering reliable without requiring a separate specialties table yet.
+
 ## Screenshots and Demo
 
 Add screenshots before publishing if available:
@@ -337,7 +353,7 @@ See:
 ## Future Improvements
 
 - Replace local storage with hardened Firebase Storage rules, signed URLs, lifecycle policies, and malware scanning.
-- Add advanced doctor search by specialty taxonomy, language, rating, fee, and availability.
+- Extend doctor discovery with language, insurance, hospital affiliation, and richer specialty taxonomy.
 - Add Google Calendar sync for doctors and patients.
 - Add email/SMS notifications for booking, cancellation, leave approval, and consultation completion.
 - Add detailed audit export, retention policies, and anomaly detection.

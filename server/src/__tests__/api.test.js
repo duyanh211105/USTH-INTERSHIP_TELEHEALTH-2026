@@ -16,11 +16,12 @@ const { default: app } = await import('../app.js');
 const { closeDatabase, getDatabase } = await import('../db/connection.js');
 const { initializeDatabase, postgresSchemaSql } = await import('../db/schema.js');
 const { seedDatabase } = await import('../db/seed.js');
+const { getSpecialtyLabel, normalizeSpecialtyCode } = await import('../services/specialtyService.js');
 
-async function login(email, password = 'password123') {
+async function login(phone, password = 'password123') {
   const response = await request(app)
     .post('/auth/login')
-    .send({ email, password })
+    .send({ phone, password })
     .expect(200);
 
   return response.body.data.token;
@@ -33,7 +34,7 @@ function patientRegistration(overrides = {}) {
     full_name: `Registered Patient ${suffix}`,
     email: `registered-${suffix}@example.com`,
     password: 'patientSecret123',
-    phone: '0901234567',
+    phone: `09${String(Math.round(Math.random() * 1e8)).padStart(8, '0')}`,
     national_id: `0${String(Math.round(Math.random() * 1e10)).padStart(10, '1').slice(0, 10)}`,
     permanent_address: '123 Nguyen Trai, District 1, Ho Chi Minh City',
     ...overrides,
@@ -49,11 +50,11 @@ describe('telehealth backend API', () => {
 
   function dateTimeOffsetMinutes(offsetMinutes) {
     const value = new Date(Date.now() + offsetMinutes * 60 * 1000);
-    const year = value.getFullYear();
-    const month = String(value.getMonth() + 1).padStart(2, '0');
-    const day = String(value.getDate()).padStart(2, '0');
-    const hours = String(value.getHours()).padStart(2, '0');
-    const minutes = String(value.getMinutes()).padStart(2, '0');
+    const year = value.getUTCFullYear();
+    const month = String(value.getUTCMonth() + 1).padStart(2, '0');
+    const day = String(value.getUTCDate()).padStart(2, '0');
+    const hours = String(value.getUTCHours()).padStart(2, '0');
+    const minutes = String(value.getUTCMinutes()).padStart(2, '0');
 
     return {
       date: `${year}-${month}-${day}`,
@@ -100,9 +101,9 @@ describe('telehealth backend API', () => {
   before(async () => {
     await initializeDatabase();
     await seedDatabase();
-    patientToken = await login('patient@example.com');
-    doctorToken = await login('doctor@example.com');
-    adminToken = await login('admin@example.com');
+    patientToken = await login('0900000001');
+    doctorToken = await login('0900000002');
+    adminToken = await login('0123456789');
 
     const patientMe = await request(app)
       .get('/auth/me')
@@ -134,6 +135,29 @@ describe('telehealth backend API', () => {
     assert.equal(response.body.data.user.password_hash, undefined);
   });
 
+  it('authenticates users by phone number and rejects email-based login payloads', async () => {
+    const phoneLogin = await request(app)
+      .post('/auth/login')
+      .send({ phone: '0900000001', password: 'password123' })
+      .expect(200);
+
+    assert.equal(phoneLogin.body.data.user.phone, '0900000001');
+
+    const emailLogin = await request(app)
+      .post('/auth/login')
+      .send({ email: 'patient@example.com', password: 'password123' })
+      .expect(400);
+
+    assert.match(emailLogin.body.error.message, /phone/i);
+
+    const invalidPhone = await request(app)
+      .post('/auth/login')
+      .send({ phone: 'patient@example.com', password: 'password123' })
+      .expect(400);
+
+    assert.match(invalidPhone.body.error.message, /phone/i);
+  });
+
   it('requires JWT tokens for protected APIs', async () => {
     await request(app).get('/appointments').expect(401);
   });
@@ -155,7 +179,7 @@ describe('telehealth backend API', () => {
     assert.equal(registered.body.data.user.permanentAddress, payload.permanent_address);
     assert.equal(registered.body.data.user.password_hash, undefined);
 
-    const token = await login(payload.email, payload.password);
+    const token = await login(payload.phone, payload.password);
     assert.equal(typeof token, 'string');
   });
 
@@ -183,6 +207,19 @@ describe('telehealth backend API', () => {
       .expect(409);
 
     assert.match(duplicate.body.error.message, /national/i);
+  });
+
+  it('rejects duplicate patient phone numbers', async () => {
+    const payload = patientRegistration({ email: 'phone-a@example.com', national_id: '0123456888', phone: '0901234999' });
+
+    await request(app).post('/auth/register').send(payload).expect(201);
+
+    const duplicate = await request(app)
+      .post('/auth/register')
+      .send({ ...patientRegistration({ email: 'phone-b@example.com', national_id: '0123456889' }), phone: payload.phone })
+      .expect(409);
+
+    assert.match(duplicate.body.error.message, /phone/i);
   });
 
   it('validates patient national id format and permanent address', async () => {
@@ -252,16 +289,159 @@ describe('telehealth backend API', () => {
     assert.equal(filtered.body.data.doctors.every((doctor) => doctor.consultationFee >= 70 && doctor.consultationFee <= 90), true);
 
     const availableDoctors = await request(app)
-      .get('/doctors?date=2026-05-11')
+      .get(`/doctors?date=${nextUtcDateForWeekday(1)}`)
       .set('Authorization', `Bearer ${patientToken}`)
       .expect(200);
     assert.equal(availableDoctors.body.data.doctors.some((doctor) => doctor.id === doctorId), true);
 
     const unavailableDoctors = await request(app)
-      .get('/doctors?date=2026-05-17')
+      .get(`/doctors?date=${nextUtcDateForWeekday(0)}`)
       .set('Authorization', `Bearer ${patientToken}`)
       .expect(200);
     assert.equal(unavailableDoctors.body.data.doctors.some((doctor) => doctor.id === doctorId), false);
+  });
+
+  it('normalizes legacy specialties and safely handles richer doctor search filters', async () => {
+    assert.equal(normalizeSpecialtyCode('heart doctor'), 'CARDIOLOGY');
+    assert.equal(normalizeSpecialtyCode('tim'), 'CARDIOLOGY');
+    assert.equal(getSpecialtyLabel('CARDIOLOGY'), 'Cardiology');
+
+    const heartDoctor = await request(app)
+      .post('/admin/doctors')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        full_name: 'Dr. Carter Heart',
+        email: 'carter-heart@example.com',
+        password: 'doctorSecret123',
+        specialty: 'Heart Doctor',
+        phone: '0911111190',
+        bio: 'Legacy cardiology specialty text.',
+        consultation_fee: 60,
+      })
+      .expect(201);
+
+    const pediatricDoctor = await request(app)
+      .post('/admin/doctors')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        full_name: 'Dr. Pediatric Care',
+        email: 'pediatric-care@example.com',
+        password: 'doctorSecret123',
+        specialty: 'PEDIATRICS',
+        phone: '0911111191',
+        bio: 'Pediatric care provider.',
+        consultation_fee: 20,
+      })
+      .expect(201);
+
+    assert.equal(heartDoctor.body.data.doctor.specialty, 'Cardiology');
+    assert.equal(heartDoctor.body.data.doctor.specialtyCode, 'CARDIOLOGY');
+    assert.equal(pediatricDoctor.body.data.doctor.specialty, 'Pediatrics');
+
+    const filtered = await request(app)
+      .get('/doctors?specialty=CARDIOLOGY&q=car&minFee=&maxFee=not-a-number&videoAvailable=true&sort=lowest_fee')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+
+    assert.equal(filtered.body.data.doctors.some((doctor) => doctor.id === heartDoctor.body.data.doctor.id), true);
+    assert.equal(filtered.body.data.doctors.every((doctor) => doctor.specialtyCode === 'CARDIOLOGY'), true);
+    assert.equal(filtered.body.data.doctors.every((doctor) => doctor.videoConsultationAvailable === true), true);
+
+    const availableToday = await request(app)
+      .get('/doctors?availableToday=true&sort=unknown-sort')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+
+    assert.equal(Array.isArray(availableToday.body.data.doctors), true);
+
+    const unknownSpecialty = await request(app)
+      .get('/doctors?specialty=NOT_A_SPECIALTY&minFee=bad&maxFee=')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+
+    assert.equal(Array.isArray(unknownSpecialty.body.data.doctors), true);
+  });
+
+  it('filters doctors by qualification, experience, rating, language, gender, and real availability windows', async () => {
+    const created = await request(app)
+      .post('/admin/doctors')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        full_name: 'Dr. Qualified Search',
+        email: 'qualified-search@example.com',
+        password: 'doctorSecret123',
+        specialty: 'Neurology',
+        qualification_title: 'SPECIALIST_LEVEL_II',
+        phone: '0911111188',
+        bio: 'Advanced neurology provider.',
+        consultation_fee: 95,
+        years_of_experience: 16,
+        gender: 'Female',
+        languages_spoken: 'Vietnamese, English',
+      })
+      .expect(201);
+    const createdDoctor = created.body.data.doctor;
+
+    const insertSchedule = getDatabase().prepare(`
+      INSERT INTO doctor_schedules (doctor_id, weekday, start_time, end_time, slot_duration)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const weekday of [0, 1, 2, 3, 4, 5, 6]) {
+      insertSchedule.run(createdDoctor.id, weekday, '08:00', '09:00', 30);
+    }
+
+    const filtered = await request(app)
+      .get('/doctors?qualificationTitle=SPECIALIST_LEVEL_II&minExperience=10&minRating=4.5&gender=Female&language=English&availableThisWeek=true&sort=earliest_availability')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+
+    const doctor = filtered.body.data.doctors.find((item) => item.id === createdDoctor.id);
+    assert.ok(doctor);
+    assert.equal(doctor.qualificationTitle, 'Specialist Level II');
+    assert.equal(doctor.qualificationCode, 'SPECIALIST_LEVEL_II');
+    assert.equal(doctor.yearsOfExperience, 16);
+    assert.equal(doctor.gender, 'Female');
+    assert.match(doctor.languagesSpoken, /English/);
+    assert.ok(doctor.nextAvailableSlot);
+    assert.match(doctor.availabilitySummary, /Next Available|Available/);
+  });
+
+  it('allows one patient doctor review after a completed appointment and updates cached rating fields', async () => {
+    const appointmentId = insertVideoAppointment({ status: 'COMPLETED', offsetMinutes: -30, reason: 'Completed review appointment' });
+
+    const createdReview = await request(app)
+      .post(`/doctors/${doctorId}/reviews`)
+      .set('Authorization', `Bearer ${patientToken}`)
+      .send({
+        appointmentId,
+        rating: 5,
+        comment: 'Doctor explained everything clearly and was very attentive.',
+      })
+      .expect(201);
+
+    assert.equal(createdReview.body.data.review.rating, 5);
+    assert.equal(createdReview.body.data.review.appointmentId, appointmentId);
+
+    await request(app)
+      .post(`/doctors/${doctorId}/reviews`)
+      .set('Authorization', `Bearer ${patientToken}`)
+      .send({ appointmentId, rating: 4 })
+      .expect(409);
+
+    const doctors = await request(app)
+      .get('/doctors')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    const reviewedDoctor = doctors.body.data.doctors.find((doctor) => doctor.id === doctorId);
+    assert.equal(reviewedDoctor.averageRating, 5);
+    assert.equal(reviewedDoctor.reviewCount, 1);
+
+    const pendingAppointmentId = insertVideoAppointment({ status: 'PENDING', offsetMinutes: 45, reason: 'Pending review not allowed' });
+    await request(app)
+      .post(`/doctors/${doctorId}/reviews`)
+      .set('Authorization', `Bearer ${patientToken}`)
+      .send({ appointmentId: pendingAppointmentId, rating: 5 })
+      .expect(400);
   });
 
   it('lets admins create, edit, list, and deactivate doctors', async () => {
@@ -302,7 +482,7 @@ describe('telehealth backend API', () => {
       .set('Authorization', `Bearer ${adminToken}`)
       .send({ specialty: 'Family Medicine', consultation_fee: 55, availability_summary: 'Weekdays' })
       .expect(200);
-    assert.equal(edited.body.data.doctor.specialty, 'Family Medicine');
+    assert.equal(edited.body.data.doctor.specialty, 'General Medicine');
     assert.equal(edited.body.data.doctor.consultationFee, 55);
 
     const publicDoctors = await request(app)
@@ -348,7 +528,7 @@ describe('telehealth backend API', () => {
 
     await request(app)
       .post('/auth/login')
-      .send({ email: 'lifecycle-doctor@example.com', password: 'password123' })
+      .send({ phone: '0909999999', password: 'password123' })
       .expect(403);
 
     const visibleDoctors = await request(app)
@@ -363,7 +543,7 @@ describe('telehealth backend API', () => {
       .send({ status: 'ACTIVE' })
       .expect(200);
 
-    const lifecycleDoctorToken = await login('lifecycle-doctor@example.com');
+    const lifecycleDoctorToken = await login('0909999999');
 
     await request(app)
       .put('/doctors/me/availability')
@@ -412,7 +592,7 @@ describe('telehealth backend API', () => {
 
     await request(app)
       .post('/auth/login')
-      .send({ email: 'lifecycle-doctor@example.com', password: 'password123' })
+      .send({ phone: '0909999999', password: 'password123' })
       .expect(403);
   });
 
@@ -460,6 +640,37 @@ describe('telehealth backend API', () => {
       .expect(200);
 
     assert.equal(listed.body.data.appointments.some((appointment) => appointment.id === appointmentId), true);
+  });
+
+  it('returns only the next five future pending or confirmed appointments from the upcoming endpoint', async () => {
+    getDatabase().prepare("UPDATE appointments SET status = 'CANCELLED' WHERE patient_id = ?").run(patientId);
+
+    const insertedIds = [
+      insertVideoAppointment({ status: 'PENDING', offsetMinutes: 90, reason: 'Upcoming pending 90' }),
+      insertVideoAppointment({ status: 'CONFIRMED', offsetMinutes: 30, reason: 'Upcoming confirmed 30' }),
+      insertVideoAppointment({ status: 'CONFIRMED', offsetMinutes: 60, reason: 'Upcoming confirmed 60' }),
+      insertVideoAppointment({ status: 'PENDING', offsetMinutes: 120, reason: 'Upcoming pending 120' }),
+      insertVideoAppointment({ status: 'PENDING', offsetMinutes: 150, reason: 'Upcoming pending 150' }),
+      insertVideoAppointment({ status: 'PENDING', offsetMinutes: 180, reason: 'Upcoming pending 180' }),
+      insertVideoAppointment({ status: 'COMPLETED', offsetMinutes: 15, reason: 'Completed should not appear' }),
+      insertVideoAppointment({ status: 'CANCELLED', offsetMinutes: 20, reason: 'Cancelled should not appear' }),
+      insertVideoAppointment({ status: 'PENDING', offsetMinutes: -20, reason: 'Past should not appear' }),
+    ];
+
+    const response = await request(app)
+      .get('/appointments/upcoming')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+
+    const appointments = response.body.data.appointments;
+    assert.equal(appointments.length, 5);
+    assert.deepEqual(
+      appointments.map((appointment) => appointment.appointmentId),
+      [insertedIds[1], insertedIds[2], insertedIds[0], insertedIds[3], insertedIds[4]],
+    );
+    assert.equal(appointments.every((appointment) => ['PENDING', 'CONFIRMED'].includes(appointment.status)), true);
+    assert.equal(appointments.some((appointment) => appointment.appointmentId === insertedIds[5]), false);
+    assert.equal(appointments.every((appointment) => appointment.doctorName && appointment.appointmentDate && appointment.appointmentTime), true);
   });
 
   it('generates a Jitsi video room when an appointment is confirmed and allows assigned users to join inside the access window', async () => {
@@ -554,7 +765,7 @@ describe('telehealth backend API', () => {
 
     const otherPatient = patientRegistration({ email: 'video-unrelated@example.com', national_id: '0123456788' });
     await request(app).post('/auth/register').send(otherPatient).expect(201);
-    const otherPatientToken = await login(otherPatient.email, otherPatient.password);
+    const otherPatientToken = await login(otherPatient.phone, otherPatient.password);
 
     const unauthorizedRoom = await request(app)
       .get(`/appointments/${futureAppointmentId}/video-room`)
@@ -572,7 +783,7 @@ describe('telehealth backend API', () => {
   it('returns appointment and patient detail only when the user has access', async () => {
     const secondPatient = patientRegistration({ email: 'routing-patient@example.com', national_id: '0123456796' });
     const registered = await request(app).post('/auth/register').send(secondPatient).expect(201);
-    const secondPatientToken = await login(secondPatient.email, secondPatient.password);
+    const secondPatientToken = await login(secondPatient.phone, secondPatient.password);
     const secondPatientId = registered.body.data.user.id;
 
     const appointment = await request(app)
@@ -1074,7 +1285,7 @@ describe('telehealth backend API', () => {
   it('prevents patients from accessing another patient record upload route', async () => {
     const otherPatient = patientRegistration({ email: 'other-record-patient@example.com', national_id: '0123456794' });
     await request(app).post('/auth/register').send(otherPatient).expect(201);
-    const otherToken = await login(otherPatient.email, otherPatient.password);
+    const otherToken = await login(otherPatient.phone, otherPatient.password);
 
     const record = await request(app)
       .post('/records')
@@ -1091,7 +1302,7 @@ describe('telehealth backend API', () => {
   it('prevents doctors from seeing unrelated patient records', async () => {
     const unrelatedPatient = patientRegistration({ email: 'unrelated-patient@example.com', national_id: '0123456795' });
     await request(app).post('/auth/register').send(unrelatedPatient).expect(201);
-    const unrelatedToken = await login(unrelatedPatient.email, unrelatedPatient.password);
+    const unrelatedToken = await login(unrelatedPatient.phone, unrelatedPatient.password);
 
     const record = await request(app)
       .post('/records')
@@ -1152,6 +1363,38 @@ describe('telehealth backend API', () => {
       .expect(200);
 
     assert.ok(doctorListed.body.data.symptoms.length > 0);
+  });
+
+  it('links post-booking chatbot intake to the appointment and creates a medical intake record', async () => {
+    const appointmentId = insertVideoAppointment({ status: 'PENDING', offsetMinutes: 45, reason: 'Intake link test' });
+
+    const created = await request(app)
+      .post('/symptoms')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .send({
+        patientId,
+        appointmentId,
+        mainSymptom: 'Cough and fatigue',
+        duration: '3 days',
+        fever: 'No',
+        medication: 'Cough syrup',
+        allergies: 'None',
+        previousHistory: 'Asthma',
+        summary: 'Patient reports cough and fatigue for 3 days. Chronic disease: Asthma.',
+      })
+      .expect(201);
+
+    assert.equal(created.body.data.symptom.appointmentId, appointmentId);
+    assert.equal(typeof created.body.data.symptom.medicalRecordId, 'number');
+
+    const record = await getDatabase()
+      .prepare('SELECT * FROM medical_records WHERE id = ?')
+      .get(created.body.data.symptom.medicalRecordId);
+
+    assert.equal(Number(record.patient_id), patientId);
+    assert.equal(Number(record.appointment_id), appointmentId);
+    assert.match(record.notes, /Cough and fatigue/);
+    assert.match(record.notes, /Asthma/);
   });
 
   it('stores and reads structured symptom summary priority and red flags', async () => {
@@ -1269,7 +1512,7 @@ describe('telehealth backend API', () => {
   it('records audit logs for key events and exposes paginated logs only to admins', async () => {
     await request(app)
       .post('/auth/login')
-      .send({ email: 'patient@example.com', password: 'wrong-password' })
+      .send({ phone: '0900000001', password: 'wrong-password' })
       .expect(401);
 
     await request(app)

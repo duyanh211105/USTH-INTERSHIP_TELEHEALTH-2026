@@ -1,6 +1,5 @@
 import {
   Activity,
-  Bot,
   CalendarPlus,
   ClipboardList,
   CalendarClock,
@@ -21,7 +20,7 @@ import { getStoredUser } from '../services/apiClient.js';
 const navigation = {
   patient: [
     { label: 'Dashboard', to: '/patient', icon: Home },
-    { label: 'Symptom Chatbot', to: '/patient/chatbot', icon: Bot },
+    { label: 'Appointments', to: '/patient/appointments', icon: CalendarClock },
     { label: 'Book Appointment', to: '/patient/book', icon: CalendarPlus },
     { label: 'Medical Records', to: '/patient/records', icon: FileText },
     { label: 'Consultation Result', to: '/patient/result', icon: ClipboardList },

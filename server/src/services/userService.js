@@ -1,4 +1,5 @@
 import { getDatabase } from '../db/connection.js';
+import { ApiError } from '../middleware/errors.js';
 
 export function mapUser(row) {
   if (!row) return null;
@@ -16,8 +17,30 @@ export function mapUser(row) {
   };
 }
 
+export function normalizePhone(phone) {
+  return String(phone || '').trim().replace(/\s+/g, '');
+}
+
+export function validatePhone(phone, fieldName = 'phone') {
+  const normalizedPhone = normalizePhone(phone);
+
+  if (!normalizedPhone) {
+    throw new ApiError(400, `${fieldName} is required`);
+  }
+
+  if (!/^0\d{9,10}$/.test(normalizedPhone)) {
+    throw new ApiError(400, `${fieldName} must contain 10-11 digits and begin with 0`);
+  }
+
+  return normalizedPhone;
+}
+
 export async function findUserByEmail(email) {
   return getDatabase().prepare('SELECT * FROM users WHERE email = ?').get(String(email || '').toLowerCase());
+}
+
+export async function findUserByPhone(phone) {
+  return getDatabase().prepare('SELECT * FROM users WHERE phone = ?').get(normalizePhone(phone));
 }
 
 export async function findUserByNationalId(nationalId) {

@@ -3,6 +3,7 @@ import {
   getAppointmentForUser,
   getAppointmentVideoRoomForUser,
   listAppointmentsForUser,
+  listUpcomingAppointmentsForUser,
   updateAppointmentStatus,
 } from '../services/appointmentService.js';
 import { createAuditLog } from '../services/auditService.js';
@@ -11,6 +12,10 @@ import { sendSuccess } from '../services/responseService.js';
 
 export async function getAppointments(req, res) {
   return sendSuccess(res, { appointments: await listAppointmentsForUser(req.user) });
+}
+
+export async function getUpcomingAppointments(req, res) {
+  return sendSuccess(res, { appointments: await listUpcomingAppointmentsForUser(req.user, { limit: 5 }) });
 }
 
 export async function getAppointment(req, res) {

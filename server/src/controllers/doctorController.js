@@ -1,4 +1,6 @@
 import { listDoctors } from '../services/doctorService.js';
+import { createDoctorReview } from '../services/doctorReviewService.js';
+import { createAuditLog } from '../services/auditService.js';
 import { sendSuccess } from '../services/responseService.js';
 import {
   addDoctorUnavailability,
@@ -15,6 +17,22 @@ export async function getDoctors(req, res) {
 
 export async function getDoctorSlots(req, res) {
   return sendSuccess(res, { slots: await generateSlots(req.query.date, Number(req.params.id)) });
+}
+
+export async function postDoctorReview(req, res) {
+  const review = await createDoctorReview(req.user, Number(req.params.id), req.body);
+  await createAuditLog({
+    actor: req.user,
+    action: 'doctor.review.created',
+    entityType: 'doctor',
+    entityId: Number(req.params.id),
+    metadata: {
+      appointmentId: review.appointmentId,
+      rating: review.rating,
+    },
+    ipAddress: req.ip,
+  });
+  return sendSuccess(res, { review }, 201);
 }
 
 export async function getMyAvailability(req, res) {

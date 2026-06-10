@@ -12,6 +12,7 @@ import BookAppointmentPage from './pages/patient/BookAppointmentPage.jsx';
 import ChatbotPage from './pages/patient/ChatbotPage.jsx';
 import ConsultationResultPage from './pages/patient/ConsultationResultPage.jsx';
 import MedicalRecordsPage from './pages/patient/MedicalRecordsPage.jsx';
+import PatientAppointmentsPage from './pages/patient/PatientAppointmentsPage.jsx';
 import PatientDashboard from './pages/patient/PatientDashboard.jsx';
 
 export default function App() {
@@ -22,6 +23,7 @@ export default function App() {
       <Route path="/register" element={<RegisterPage />} />
       <Route path="/patient" element={<PatientDashboard />} />
       <Route path="/patient/chatbot" element={<ChatbotPage />} />
+      <Route path="/patient/appointments" element={<PatientAppointmentsPage />} />
       <Route path="/patient/book" element={<BookAppointmentPage />} />
       <Route path="/patient/records" element={<MedicalRecordsPage />} />
       <Route path="/patient/result" element={<ConsultationResultPage />} />

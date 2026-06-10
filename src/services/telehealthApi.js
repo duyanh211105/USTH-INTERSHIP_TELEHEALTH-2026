@@ -1,9 +1,9 @@
 import { apiRequest, buildUrl, storeSession } from './apiClient.js';
 
-export async function login(email, password) {
+export async function login(phone, password) {
   const data = await apiRequest('/auth/login', {
     method: 'POST',
-    body: { email, password },
+    body: { phone, password },
   });
 
   storeSession(data);
@@ -40,6 +40,13 @@ export function getDoctors(params = {}) {
 
 export function getDoctorSlots(doctorId, date) {
   return apiRequest(`/doctors/${doctorId}/slots?date=${encodeURIComponent(date)}`).then((data) => data.slots || []);
+}
+
+export function createDoctorReview(doctorId, payload) {
+  return apiRequest(`/doctors/${doctorId}/reviews`, {
+    method: 'POST',
+    body: payload,
+  }).then((data) => data.review);
 }
 
 export function getMyAvailability() {
@@ -83,6 +90,10 @@ export function createLeaveRequest(payload) {
 
 export function getAppointments() {
   return apiRequest('/appointments').then((data) => data.appointments || []);
+}
+
+export function getUpcomingAppointments() {
+  return apiRequest('/appointments/upcoming').then((data) => data.appointments || []);
 }
 
 export function getAppointment(appointmentId) {

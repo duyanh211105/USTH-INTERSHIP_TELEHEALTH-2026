@@ -1,7 +1,7 @@
 import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
 import { getDatabase } from '../db/connection.js';
-import { findUserByEmail, findUserById, findUserByNationalId, mapUser } from './userService.js';
+import { findUserByEmail, findUserById, findUserByNationalId, findUserByPhone, mapUser, validatePhone } from './userService.js';
 import { getJwtSecret } from '../middleware/auth.js';
 import { ApiError } from '../middleware/errors.js';
 
@@ -13,7 +13,7 @@ function validatePatientRegistration(data) {
   const fullName = String(data.full_name || data.fullName || '').trim();
   const email = normalizeEmail(data.email);
   const password = String(data.password || '');
-  const phone = String(data.phone || '').trim();
+  const phone = validatePhone(data.phone);
   const nationalId = String(data.national_id || data.nationalId || '').trim();
   const permanentAddress = String(data.permanent_address || data.permanentAddress || '').trim();
 
@@ -27,10 +27,6 @@ function validatePatientRegistration(data) {
 
   if (!password) {
     throw new ApiError(400, 'password is required');
-  }
-
-  if (!phone) {
-    throw new ApiError(400, 'phone is required');
   }
 
   if (!nationalId) {
@@ -48,11 +44,12 @@ function validatePatientRegistration(data) {
   return { fullName, email, password, phone, nationalId, permanentAddress };
 }
 
-export async function loginUser(email, password) {
-  const user = await findUserByEmail(email);
+export async function loginUser(phone, password) {
+  const normalizedPhone = validatePhone(phone);
+  const user = await findUserByPhone(normalizedPhone);
 
   if (!user) {
-    throw new ApiError(401, 'Invalid email or password');
+    throw new ApiError(401, 'Invalid phone number or password');
   }
 
   if (user.status !== 'ACTIVE') {
@@ -62,7 +59,7 @@ export async function loginUser(email, password) {
   const passwordMatches = await bcrypt.compare(password, user.password_hash);
 
   if (!passwordMatches) {
-    throw new ApiError(401, 'Invalid email or password');
+    throw new ApiError(401, 'Invalid phone number or password');
   }
 
   const token = jwt.sign({ sub: user.id, role: user.role }, getJwtSecret(), { expiresIn: '8h' });
@@ -75,6 +72,10 @@ export async function registerPatient(data) {
 
   if (await findUserByEmail(registration.email)) {
     throw new ApiError(409, 'email is already registered');
+  }
+
+  if (await findUserByPhone(registration.phone)) {
+    throw new ApiError(409, 'phone is already registered');
   }
 
   if (await findUserByNationalId(registration.nationalId)) {

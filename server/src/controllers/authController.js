@@ -3,15 +3,15 @@ import { createAuditLog } from '../services/auditService.js';
 import { sendSuccess } from '../services/responseService.js';
 
 export async function login(req, res) {
-  const { email, password } = req.body;
+  const { phone, password } = req.body;
   try {
-    const result = await loginUser(email, password);
+    const result = await loginUser(phone, password);
     await createAuditLog({
       actor: result.user,
       action: 'auth.login.success',
       entityType: 'user',
       entityId: result.user.id,
-      metadata: { email },
+      metadata: { phone },
       ipAddress: req.ip,
     });
     return sendSuccess(res, result);
@@ -19,7 +19,7 @@ export async function login(req, res) {
     await createAuditLog({
       action: 'auth.login.failure',
       entityType: 'user',
-      metadata: { email, reason: error.message },
+      metadata: { phone, reason: error.message },
       ipAddress: req.ip,
     });
     throw error;

@@ -43,6 +43,7 @@ function mapAppointment(row) {
     patientName: row.patient_name,
     doctorId: Number(row.doctor_id),
     doctorName: row.doctor_name,
+    specialty: row.specialty || 'Telehealth',
     scheduledDate: toDateString(row.scheduled_date),
     scheduledTime: toTimeString(row.scheduled_time),
     reason: row.reason,
@@ -67,7 +68,7 @@ function parseAppointmentStart(appointment) {
 
   const date = toDateString(appointment.scheduledDate);
   const time = toTimeString(appointment.scheduledTime);
-  const value = new Date(`${date}T${time}:00`);
+  const value = new Date(`${date}T${time}:00Z`);
 
   return Number.isNaN(value.getTime()) ? null : value;
 }
@@ -126,10 +127,11 @@ async function ensureVideoRoom(appointment, actor, ipAddress = null) {
 }
 
 const appointmentSelect = `
-  SELECT a.*, patient.name AS patient_name, doctor.name AS doctor_name
+  SELECT a.*, patient.name AS patient_name, doctor.name AS doctor_name, profile.specialty AS specialty
   FROM appointments a
   JOIN users patient ON patient.id = a.patient_id
   JOIN users doctor ON doctor.id = a.doctor_id
+  LEFT JOIN doctor_profiles profile ON profile.user_id = doctor.id
 `;
 
 export async function getAppointmentById(id) {
@@ -176,6 +178,52 @@ export async function listAppointmentsForUser(user) {
   query += ' ORDER BY a.scheduled_date ASC, a.scheduled_time ASC, a.id ASC';
   const rows = await getDatabase().prepare(query).all(...params);
   return rows.map(mapAppointment);
+}
+
+function mapUpcomingAppointment(appointment) {
+  return {
+    appointmentId: appointment.id,
+    id: appointment.id,
+    doctorName: appointment.doctorName,
+    specialty: appointment.specialty,
+    appointmentDate: appointment.scheduledDate,
+    appointmentTime: appointment.scheduledTime,
+    scheduledDate: appointment.scheduledDate,
+    scheduledTime: appointment.scheduledTime,
+    status: appointment.status,
+    videoRoomUrl: appointment.videoRoomUrl,
+    videoRoomProvider: appointment.videoRoomProvider,
+  };
+}
+
+export async function listUpcomingAppointmentsForUser(user, options = {}) {
+  await expireStalePendingAppointments();
+
+  const limit = Number(options.limit || 5);
+  const now = options.now ? new Date(options.now) : new Date();
+  let query = `${appointmentSelect} WHERE a.status IN ('PENDING', 'CONFIRMED')`;
+  const params = [];
+
+  if (user.role === 'patient') {
+    query += ' AND a.patient_id = ?';
+    params.push(user.id);
+  } else if (user.role === 'doctor') {
+    query += ' AND a.doctor_id = ?';
+    params.push(user.id);
+  }
+
+  query += ' ORDER BY a.scheduled_date ASC, a.scheduled_time ASC, a.id ASC';
+
+  const rows = await getDatabase().prepare(query).all(...params);
+  return rows
+    .map(mapAppointment)
+    .filter((appointment) => {
+      const startsAt = parseAppointmentStart(appointment);
+      return startsAt && startsAt > now;
+    })
+    .sort((left, right) => parseAppointmentStart(left) - parseAppointmentStart(right))
+    .slice(0, Number.isFinite(limit) && limit > 0 ? limit : 5)
+    .map(mapUpcomingAppointment);
 }
 
 export async function createAppointment(user, data) {

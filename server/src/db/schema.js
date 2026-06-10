@@ -78,19 +78,76 @@ async function migrateExistingSchema(db) {
   await addColumnIfMissing(db, 'users', 'status', "TEXT NOT NULL DEFAULT 'ACTIVE'");
   await addColumnIfMissing(db, 'doctor_profiles', 'availability_summary', "TEXT NOT NULL DEFAULT ''");
   await addColumnIfMissing(db, 'doctor_profiles', 'consultation_fee', db.client === 'postgres' ? 'DOUBLE PRECISION NOT NULL DEFAULT 0' : 'REAL NOT NULL DEFAULT 0');
+  await addColumnIfMissing(db, 'doctor_profiles', 'qualification_title', "TEXT NOT NULL DEFAULT 'GENERAL_PRACTITIONER'");
+  await addColumnIfMissing(db, 'doctor_profiles', 'years_of_experience', 'INTEGER NOT NULL DEFAULT 0');
+  await addColumnIfMissing(db, 'doctor_profiles', 'gender', "TEXT NOT NULL DEFAULT ''");
+  await addColumnIfMissing(db, 'doctor_profiles', 'languages_spoken', "TEXT NOT NULL DEFAULT ''");
+  await addColumnIfMissing(db, 'doctor_profiles', 'average_rating', db.client === 'postgres' ? 'DOUBLE PRECISION NOT NULL DEFAULT 4.8' : 'REAL NOT NULL DEFAULT 4.8');
+  await addColumnIfMissing(db, 'doctor_profiles', 'review_count', 'INTEGER NOT NULL DEFAULT 0');
   await addColumnIfMissing(db, 'appointments', 'cancellation_reason', "TEXT NOT NULL DEFAULT ''");
   await addColumnIfMissing(db, 'appointments', 'cancelled_by', 'INTEGER');
   await addColumnIfMissing(db, 'appointments', 'cancelled_at', db.client === 'postgres' ? 'TIMESTAMPTZ' : 'TEXT');
   await addColumnIfMissing(db, 'appointments', 'video_room_url', 'TEXT');
   await addColumnIfMissing(db, 'appointments', 'video_room_provider', 'TEXT');
+  await addColumnIfMissing(db, 'medical_records', 'appointment_id', db.client === 'postgres' ? 'BIGINT' : 'INTEGER');
   await addColumnIfMissing(db, 'medical_documents', 'storage_provider', "TEXT NOT NULL DEFAULT 'local'");
   await addColumnIfMissing(db, 'medical_documents', 'storage_key', "TEXT NOT NULL DEFAULT ''");
+  await addColumnIfMissing(db, 'symptom_summaries', 'appointment_id', db.client === 'postgres' ? 'BIGINT' : 'INTEGER');
+  await addColumnIfMissing(db, 'symptom_summaries', 'medical_record_id', db.client === 'postgres' ? 'BIGINT' : 'INTEGER');
   await addColumnIfMissing(db, 'symptom_summaries', 'severity', "TEXT NOT NULL DEFAULT ''");
   await addColumnIfMissing(db, 'symptom_summaries', 'temperature', "TEXT NOT NULL DEFAULT ''");
   await addColumnIfMissing(db, 'symptom_summaries', 'conditional_answers', db.client === 'postgres' ? "JSONB NOT NULL DEFAULT '{}'::jsonb" : "TEXT NOT NULL DEFAULT '{}'");
   await addColumnIfMissing(db, 'symptom_summaries', 'red_flags', db.client === 'postgres' ? "JSONB NOT NULL DEFAULT '[]'::jsonb" : "TEXT NOT NULL DEFAULT '[]'");
   await addColumnIfMissing(db, 'symptom_summaries', 'priority', "TEXT NOT NULL DEFAULT 'NORMAL'");
   await addColumnIfMissing(db, 'symptom_summaries', 'doctor_summary', "TEXT NOT NULL DEFAULT ''");
+}
+
+function buildGeneratedPhone(userId, attempt = 0) {
+  if (attempt === 0) {
+    return `099${String(userId).padStart(7, '0')}`.slice(0, 10);
+  }
+
+  return `098${String(userId).padStart(5, '0')}${String(attempt).padStart(2, '0')}`.slice(0, 10);
+}
+
+async function migrateDuplicateUserPhones(db) {
+  const duplicates = await db
+    .prepare(`
+      SELECT phone
+      FROM users
+      WHERE phone IS NOT NULL
+        AND phone <> ''
+      GROUP BY phone
+      HAVING COUNT(*) > 1
+    `)
+    .all();
+
+  for (const duplicate of duplicates) {
+    const users = await db
+      .prepare(`
+        SELECT id, phone
+        FROM users
+        WHERE phone = ?
+        ORDER BY id ASC
+      `)
+      .all(duplicate.phone);
+
+    for (const user of users.slice(1)) {
+      let attempt = 0;
+      let nextPhone = buildGeneratedPhone(user.id, attempt);
+
+      while (await db.prepare('SELECT id FROM users WHERE phone = ? AND id <> ?').get(nextPhone, user.id)) {
+        attempt += 1;
+        nextPhone = buildGeneratedPhone(user.id, attempt);
+      }
+
+      // Existing local/demo databases may contain duplicate phone values from before
+      // phone-number login was introduced. Keep the first account unchanged and give
+      // later duplicates a valid placeholder so the unique index can be created safely.
+      await db.prepare('UPDATE users SET phone = ? WHERE id = ?').run(nextPhone, user.id);
+      console.warn(`Updated duplicate phone for user ${user.id} to ${nextPhone}.`);
+    }
+  }
 }
 
 function sqliteSchemaSql() {
@@ -116,7 +173,13 @@ function sqliteSchemaSql() {
       availability TEXT NOT NULL DEFAULT '',
       availability_summary TEXT NOT NULL DEFAULT '',
       consultation_fee REAL NOT NULL DEFAULT 0,
+      qualification_title TEXT NOT NULL DEFAULT 'GENERAL_PRACTITIONER',
+      years_of_experience INTEGER NOT NULL DEFAULT 0,
+      gender TEXT NOT NULL DEFAULT '',
+      languages_spoken TEXT NOT NULL DEFAULT '',
       rating REAL NOT NULL DEFAULT 4.8,
+      average_rating REAL NOT NULL DEFAULT 4.8,
+      review_count INTEGER NOT NULL DEFAULT 0,
       patients_count INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
     );
@@ -138,6 +201,19 @@ function sqliteSchemaSql() {
       FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE,
       FOREIGN KEY (cancelled_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS doctor_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      appointment_id INTEGER NOT NULL UNIQUE,
+      patient_id INTEGER NOT NULL,
+      doctor_id INTEGER NOT NULL,
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      comment TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE CASCADE,
+      FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE
     );
 
     CREATE TABLE IF NOT EXISTS doctor_availability (
@@ -192,11 +268,13 @@ function sqliteSchemaSql() {
     CREATE TABLE IF NOT EXISTS medical_records (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       patient_id INTEGER NOT NULL,
+      appointment_id INTEGER,
       title TEXT NOT NULL,
       category TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE
+      FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS medical_documents (
@@ -217,6 +295,8 @@ function sqliteSchemaSql() {
     CREATE TABLE IF NOT EXISTS symptom_summaries (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       patient_id INTEGER NOT NULL,
+      appointment_id INTEGER,
+      medical_record_id INTEGER,
       main_symptom TEXT NOT NULL,
       duration TEXT NOT NULL,
       severity TEXT NOT NULL DEFAULT '',
@@ -231,7 +311,9 @@ function sqliteSchemaSql() {
       doctor_summary TEXT NOT NULL DEFAULT '',
       summary TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE
+      FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (appointment_id) REFERENCES appointments(id) ON DELETE SET NULL,
+      FOREIGN KEY (medical_record_id) REFERENCES medical_records(id) ON DELETE SET NULL
     );
 
     CREATE TABLE IF NOT EXISTS consultation_notes (
@@ -288,7 +370,13 @@ export function postgresSchemaSql() {
       availability TEXT NOT NULL DEFAULT '',
       availability_summary TEXT NOT NULL DEFAULT '',
       consultation_fee DOUBLE PRECISION NOT NULL DEFAULT 0,
+      qualification_title TEXT NOT NULL DEFAULT 'GENERAL_PRACTITIONER',
+      years_of_experience INTEGER NOT NULL DEFAULT 0,
+      gender TEXT NOT NULL DEFAULT '',
+      languages_spoken TEXT NOT NULL DEFAULT '',
       rating DOUBLE PRECISION NOT NULL DEFAULT 4.8,
+      average_rating DOUBLE PRECISION NOT NULL DEFAULT 4.8,
+      review_count INTEGER NOT NULL DEFAULT 0,
       patients_count INTEGER NOT NULL DEFAULT 0
     );
 
@@ -305,6 +393,16 @@ export function postgresSchemaSql() {
       cancelled_at TIMESTAMPTZ,
       video_room_url TEXT,
       video_room_provider TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+
+    CREATE TABLE IF NOT EXISTS doctor_reviews (
+      id BIGSERIAL PRIMARY KEY,
+      appointment_id BIGINT NOT NULL UNIQUE REFERENCES appointments(id) ON DELETE CASCADE,
+      patient_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      doctor_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      rating INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 5),
+      comment TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
 
@@ -355,6 +453,7 @@ export function postgresSchemaSql() {
     CREATE TABLE IF NOT EXISTS medical_records (
       id BIGSERIAL PRIMARY KEY,
       patient_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      appointment_id BIGINT REFERENCES appointments(id) ON DELETE SET NULL,
       title TEXT NOT NULL,
       category TEXT NOT NULL,
       notes TEXT NOT NULL DEFAULT '',
@@ -378,6 +477,8 @@ export function postgresSchemaSql() {
     CREATE TABLE IF NOT EXISTS symptom_summaries (
       id BIGSERIAL PRIMARY KEY,
       patient_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      appointment_id BIGINT REFERENCES appointments(id) ON DELETE SET NULL,
+      medical_record_id BIGINT REFERENCES medical_records(id) ON DELETE SET NULL,
       main_symptom TEXT NOT NULL,
       duration TEXT NOT NULL,
       severity TEXT NOT NULL DEFAULT '',
@@ -427,8 +528,27 @@ function indexAndCompatibilitySql() {
     ON users(national_id)
     WHERE national_id IS NOT NULL AND national_id <> '';
 
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_users_phone_unique
+    ON users(phone)
+    WHERE phone IS NOT NULL AND phone <> '';
+
+    CREATE INDEX IF NOT EXISTS idx_medical_records_appointment_id
+    ON medical_records(appointment_id);
+
+    CREATE INDEX IF NOT EXISTS idx_symptom_summaries_appointment_id
+    ON symptom_summaries(appointment_id);
+
     CREATE INDEX IF NOT EXISTS idx_doctor_schedules_doctor_weekday
     ON doctor_schedules(doctor_id, weekday);
+
+    CREATE INDEX IF NOT EXISTS idx_doctor_reviews_doctor_id
+    ON doctor_reviews(doctor_id);
+
+    CREATE INDEX IF NOT EXISTS idx_appointments_patient_datetime_status
+    ON appointments(patient_id, scheduled_date, scheduled_time, status);
+
+    CREATE INDEX IF NOT EXISTS idx_appointments_doctor_datetime_status
+    ON appointments(doctor_id, scheduled_date, scheduled_time, status);
 
     CREATE INDEX IF NOT EXISTS idx_leave_requests_doctor_date_status
     ON leave_requests(doctor_id, date, status);
@@ -459,5 +579,6 @@ export async function initializeDatabase() {
 
   await db.exec(db.client === 'postgres' ? postgresSchemaSql() : sqliteSchemaSql());
   await migrateExistingSchema(db);
+  await migrateDuplicateUserPhones(db);
   await db.exec(indexAndCompatibilitySql());
 }

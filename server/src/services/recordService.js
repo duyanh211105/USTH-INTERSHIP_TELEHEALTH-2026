@@ -8,6 +8,7 @@ function mapRecord(row, documents = []) {
   return {
     id: Number(row.id),
     patientId: Number(row.patient_id),
+    appointmentId: row.appointment_id === null || row.appointment_id === undefined ? null : Number(row.appointment_id),
     patientName: row.patient_name,
     title: row.title,
     category: row.category,
@@ -120,15 +121,25 @@ export async function createRecord(user, data) {
     throw new ApiError(403, 'Only patients can create medical records');
   }
 
-  const { title, category, notes = '' } = data;
+  const { title, category, notes = '', appointmentId = null } = data;
 
   if (!title || !category) {
     throw new ApiError(400, 'title and category are required');
   }
 
+  if (appointmentId) {
+    const appointment = await getDatabase()
+      .prepare('SELECT id FROM appointments WHERE id = ? AND patient_id = ?')
+      .get(appointmentId, user.id);
+
+    if (!appointment) {
+      throw new ApiError(403, 'Patients can only attach records to their own appointments');
+    }
+  }
+
   const result = await getDatabase()
-    .prepare('INSERT INTO medical_records (patient_id, title, category, notes) VALUES (?, ?, ?, ?)')
-    .run(user.id, title, category, notes);
+    .prepare('INSERT INTO medical_records (patient_id, appointment_id, title, category, notes) VALUES (?, ?, ?, ?, ?)')
+    .run(user.id, appointmentId, title, category, notes);
 
   return getRecordById(Number(result.lastInsertRowid));
 }

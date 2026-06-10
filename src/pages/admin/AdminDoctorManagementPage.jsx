@@ -7,6 +7,8 @@ import DataTable from '../../components/DataTable.jsx';
 import EmptyState from '../../components/EmptyState.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
 import Toast from '../../components/Toast.jsx';
+import { DOCTOR_QUALIFICATIONS, getQualificationLabel, normalizeQualificationCode } from '../../constants/doctorQualifications.js';
+import { SPECIALTIES, getSpecialtyLabel, normalizeSpecialtyCode } from '../../constants/specialties.js';
 import DashboardLayout from '../../layouts/DashboardLayout.jsx';
 import useToast from '../../hooks/useToast.js';
 import {
@@ -24,10 +26,14 @@ const emptyForm = {
   full_name: '',
   email: '',
   password: '',
+  qualification_title: '',
   specialty: '',
   phone: '',
   bio: '',
   consultation_fee: '',
+  years_of_experience: '',
+  gender: '',
+  languages_spoken: '',
 };
 
 function doctorAvailability(doctor) {
@@ -42,6 +48,14 @@ function doctorFee(doctor) {
   }
 
   return `$${Number(value).toLocaleString('en-US', { maximumFractionDigits: 2 })}`;
+}
+
+function doctorSpecialty(doctor) {
+  return getSpecialtyLabel(doctor.specialtyCode || doctor.specialty);
+}
+
+function doctorQualification(doctor) {
+  return getQualificationLabel(doctor.qualificationCode || doctor.qualificationTitle || doctor.qualification_title);
 }
 
 export default function AdminDoctorManagementPage() {
@@ -110,18 +124,22 @@ export default function AdminDoctorManagementPage() {
       full_name: doctor.name || '',
       email: doctor.email || '',
       password: '',
-      specialty: doctor.specialty || '',
+      qualification_title: normalizeQualificationCode(doctor.qualificationCode || doctor.qualificationTitle || doctor.qualification_title),
+      specialty: normalizeSpecialtyCode(doctor.specialtyCode || doctor.specialty),
       phone: doctor.phone || '',
       bio: doctor.bio || '',
       consultation_fee: String(doctor.consultationFee ?? doctor.consultation_fee ?? ''),
+      years_of_experience: String(doctor.yearsOfExperience ?? doctor.years_of_experience ?? ''),
+      gender: doctor.gender || '',
+      languages_spoken: doctor.languagesSpoken || doctor.languages_spoken || '',
     });
   }
 
   async function handleSubmit(event) {
     event.preventDefault();
 
-    if (!form.full_name.trim() || !form.email.trim() || !form.specialty.trim()) {
-      showToast('Full name, email, and specialty are required.', 'error');
+    if (!form.full_name.trim() || !form.email.trim() || !form.specialty.trim() || !form.qualification_title.trim()) {
+      showToast('Full name, email, specialty, and qualification are required.', 'error');
       return;
     }
 
@@ -137,10 +155,14 @@ export default function AdminDoctorManagementPage() {
         full_name: form.full_name.trim(),
         email: form.email.trim(),
         password: form.password,
+        qualification_title: form.qualification_title.trim(),
         specialty: form.specialty.trim(),
         phone: form.phone.trim(),
         bio: form.bio.trim(),
         consultation_fee: Number(form.consultation_fee || 0),
+        years_of_experience: Number(form.years_of_experience || 0),
+        gender: form.gender.trim(),
+        languages_spoken: form.languages_spoken.trim(),
       };
 
       if (editingDoctor) {
@@ -278,13 +300,35 @@ export default function AdminDoctorManagementPage() {
 
               <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-1">
                 <label>
+                  <span className="text-sm font-semibold text-slate-700">Qualification</span>
+                  <select
+                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                    onChange={(event) => updateField('qualification_title', event.target.value)}
+                    value={form.qualification_title}
+                  >
+                    <option value="">Select qualification</option>
+                    {DOCTOR_QUALIFICATIONS.map((qualification) => (
+                      <option key={qualification.value} value={qualification.value}>
+                        {qualification.label}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+
+                <label>
                   <span className="text-sm font-semibold text-slate-700">Specialty</span>
-                  <input
-                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                  <select
+                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
                     onChange={(event) => updateField('specialty', event.target.value)}
-                    placeholder="Cardiology"
                     value={form.specialty}
-                  />
+                  >
+                    <option value="">Select specialty</option>
+                    {SPECIALTIES.map((specialty) => (
+                      <option key={specialty.value} value={specialty.value}>
+                        {specialty.label}
+                      </option>
+                    ))}
+                  </select>
                 </label>
 
                 <label>
@@ -318,6 +362,39 @@ export default function AdminDoctorManagementPage() {
                     placeholder="50"
                     type="number"
                     value={form.consultation_fee}
+                  />
+                </label>
+                <label>
+                  <span className="text-sm font-semibold text-slate-700">Years of experience</span>
+                  <input
+                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                    min="0"
+                    onChange={(event) => updateField('years_of_experience', event.target.value)}
+                    placeholder="10"
+                    type="number"
+                    value={form.years_of_experience}
+                  />
+                </label>
+                <label>
+                  <span className="text-sm font-semibold text-slate-700">Gender</span>
+                  <select
+                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                    onChange={(event) => updateField('gender', event.target.value)}
+                    value={form.gender}
+                  >
+                    <option value="">Not specified</option>
+                    <option value="Female">Female</option>
+                    <option value="Male">Male</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </label>
+                <label>
+                  <span className="text-sm font-semibold text-slate-700">Languages spoken</span>
+                  <input
+                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                    onChange={(event) => updateField('languages_spoken', event.target.value)}
+                    placeholder="Vietnamese, English"
+                    value={form.languages_spoken}
                   />
                 </label>
               </div>
@@ -365,11 +442,19 @@ export default function AdminDoctorManagementPage() {
                     render: (row) => (
                       <div className="max-w-xs">
                         <p className="font-bold text-slate-950">{row.name}</p>
-                        <p className="mt-1 whitespace-normal text-xs leading-5 text-slate-500">{row.email}</p>
+                        <p className="mt-1 whitespace-normal text-xs leading-5 text-slate-500">{doctorQualification(row)} - {row.email}</p>
                       </div>
                     ),
                   },
-                  { key: 'specialty', header: 'Specialty' },
+                  {
+                    key: 'specialty',
+                    header: 'Specialty',
+                    render: (row) => (
+                      <span className="inline-flex rounded-full bg-medical-50 px-2.5 py-1 text-xs font-bold text-medical-700 ring-1 ring-medical-100">
+                        {doctorSpecialty(row)}
+                      </span>
+                    ),
+                  },
                   {
                     key: 'availability',
                     header: 'Availability',

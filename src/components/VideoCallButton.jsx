@@ -10,7 +10,7 @@ function parseAppointmentStart(appointment) {
 
   const date = String(appointment.scheduledDate).slice(0, 10);
   const time = String(appointment.scheduledTime).slice(0, 5);
-  const value = new Date(`${date}T${time}:00`);
+  const value = new Date(`${date}T${time}:00Z`);
 
   return Number.isNaN(value.getTime()) ? null : value;
 }

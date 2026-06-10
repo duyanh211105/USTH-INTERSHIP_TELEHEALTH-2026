@@ -23,13 +23,47 @@ const apiDoctors = [
     id: 2,
     name: 'Dr. API Heart',
     specialty: 'Cardiology',
+    specialtyCode: 'CARDIOLOGY',
+    qualificationTitle: 'Specialist Level II',
+    qualificationCode: 'SPECIALIST_LEVEL_II',
     phone: '0912345678',
     status: 'ACTIVE',
-    availability: 'Today, 11:00 AM',
-    availabilitySummary: 'Today, 11:00 AM',
+    availability: 'Next Available: Today 11:00',
+    availabilitySummary: 'Next Available: Today 11:00',
+    nextAvailableSlot: '11:00',
+    nextAvailableAt: '2026-05-07T11:00:00.000Z',
     consultationFee: 35,
     rating: 4.9,
+    averageRating: 4.9,
+    reviewCount: 327,
+    yearsOfExperience: 12,
+    gender: 'Male',
+    languagesSpoken: 'Vietnamese, English',
     patientsCount: 1200,
+    videoConsultationAvailable: true,
+  },
+  {
+    id: 9,
+    name: 'Dr. API Skin',
+    specialty: 'Dermatology',
+    specialtyCode: 'DERMATOLOGY',
+    qualificationTitle: 'General Practitioner',
+    qualificationCode: 'GENERAL_PRACTITIONER',
+    phone: '0912345679',
+    status: 'ACTIVE',
+    availability: 'Next Available: Tomorrow 14:00',
+    availabilitySummary: 'Next Available: Tomorrow 14:00',
+    nextAvailableSlot: '14:00',
+    nextAvailableAt: '2026-05-08T14:00:00.000Z',
+    consultationFee: 55,
+    rating: 4.7,
+    averageRating: 4.7,
+    reviewCount: 88,
+    yearsOfExperience: 6,
+    gender: 'Female',
+    languagesSpoken: 'Vietnamese',
+    patientsCount: 640,
+    videoConsultationAvailable: true,
   },
 ];
 
@@ -40,6 +74,7 @@ const apiAdminDoctors = [
     name: 'Dr. Admin Skin',
     email: 'skin@example.com',
     specialty: 'Dermatology',
+    specialtyCode: 'DERMATOLOGY',
     phone: '0987654321',
     status: 'ACTIVE',
     availability: 'Weekdays',
@@ -87,11 +122,11 @@ const apiAuditLogs = [
 
 function appointmentPartsFromNow(offsetMinutes) {
   const value = new Date(Date.now() + offsetMinutes * 60 * 1000);
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, '0');
-  const day = String(value.getDate()).padStart(2, '0');
-  const hours = String(value.getHours()).padStart(2, '0');
-  const minutes = String(value.getMinutes()).padStart(2, '0');
+  const year = value.getUTCFullYear();
+  const month = String(value.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(value.getUTCDate()).padStart(2, '0');
+  const hours = String(value.getUTCHours()).padStart(2, '0');
+  const minutes = String(value.getUTCMinutes()).padStart(2, '0');
 
   return {
     scheduledDate: `${year}-${month}-${day}`,
@@ -223,6 +258,7 @@ function mockApiError(message, status) {
 describe('Telehealth frontend routes', () => {
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     apiConsultationsResponse = [];
     apiSymptomsByPatient = {};
     global.fetch = vi.fn((input, options = {}) => {
@@ -232,15 +268,21 @@ describe('Telehealth frontend routes', () => {
       const body = options.body && !isFormData ? JSON.parse(options.body) : {};
 
       if (pathname === '/auth/login') {
-        const role = body.email.startsWith('doctor')
+        const role = body.phone === '0900000002'
           ? 'doctor'
-          : body.email.startsWith('admin')
+          : body.phone === '0123456789'
             ? 'admin'
             : 'patient';
 
         return mockApiResponse({
           token: `test-token-${role}`,
-          user: { id: role === 'doctor' ? 2 : role === 'admin' ? 3 : 1, name: `${role} user`, email: body.email, role },
+          user: {
+            id: role === 'doctor' ? 2 : role === 'admin' ? 3 : 1,
+            name: `${role} user`,
+            email: `${role}@example.com`,
+            phone: body.phone,
+            role,
+          },
         });
       }
 
@@ -267,13 +309,26 @@ describe('Telehealth frontend routes', () => {
         const params = new URL(url, 'http://localhost:4000').searchParams;
         const specialty = params.get('specialty');
         const q = params.get('q');
+        const minFee = params.get('minFee');
         const maxFee = params.get('maxFee');
+        const availableToday = params.get('availableToday') === 'true';
+        const qualificationTitle = params.get('qualificationTitle');
+        const minExperience = params.get('minExperience');
+        const minRating = params.get('minRating');
+        const gender = params.get('gender');
+        const language = params.get('language');
+        const availableNext3Days = params.get('availableNext3Days') === 'true';
+        const availableThisWeek = params.get('availableThisWeek') === 'true';
         const filteredDoctors = apiDoctors.filter((doctor) => {
-          if (specialty && !doctor.specialty.toLowerCase().includes(specialty.toLowerCase())) {
+          if (specialty && doctor.specialtyCode !== specialty) {
             return false;
           }
 
-          if (q && !doctor.name.toLowerCase().includes(q.toLowerCase())) {
+          if (q && !`${doctor.name} ${doctor.specialty}`.toLowerCase().includes(q.toLowerCase())) {
+            return false;
+          }
+
+          if (minFee && Number(doctor.consultationFee) < Number(minFee)) {
             return false;
           }
 
@@ -281,14 +336,56 @@ describe('Telehealth frontend routes', () => {
             return false;
           }
 
+          if (availableToday && !doctor.availability.toLowerCase().includes('today')) {
+            return false;
+          }
+
+          if (qualificationTitle && doctor.qualificationCode !== qualificationTitle) {
+            return false;
+          }
+
+          if (minExperience && Number(doctor.yearsOfExperience) < Number(minExperience)) {
+            return false;
+          }
+
+          if (minRating && Number(doctor.averageRating) < Number(minRating)) {
+            return false;
+          }
+
+          if (gender && doctor.gender !== gender) {
+            return false;
+          }
+
+          if (language && !doctor.languagesSpoken.toLowerCase().includes(language.toLowerCase())) {
+            return false;
+          }
+
           return true;
         });
 
-        if (specialty || q || maxFee || params.get('date')) {
+        if (
+          specialty || q || minFee || maxFee || params.get('date') || availableToday
+          || availableNext3Days || availableThisWeek || qualificationTitle || minExperience
+          || minRating || gender || language || params.get('videoAvailable') || params.get('sort')
+        ) {
           return mockApiResponse({ doctors: filteredDoctors });
         }
 
         return mockApiResponse({ doctors: apiDoctors });
+      }
+
+      const doctorReviewMatch = pathname.match(/^\/doctors\/(\d+)\/reviews$/);
+      if (doctorReviewMatch && options.method === 'POST') {
+        return mockApiResponse({
+          review: {
+            id: 700,
+            doctorId: Number(doctorReviewMatch[1]),
+            appointmentId: body.appointmentId,
+            rating: body.rating,
+            comment: body.comment,
+            createdAt: '2026-05-20T08:00:00.000Z',
+          },
+        }, 201);
       }
 
       if (pathname === '/doctors/2/slots') {
@@ -338,6 +435,21 @@ describe('Telehealth frontend routes', () => {
 
       if (pathname === '/doctors/me/unavailability') {
         return mockApiResponse({ unavailability: [] });
+      }
+
+      if (pathname === '/appointments/upcoming') {
+        return mockApiResponse({
+          appointments: apiAppointments.slice(0, 2).map((appointment) => ({
+            appointmentId: appointment.id,
+            doctorName: appointment.doctorName,
+            specialty: 'Cardiology',
+            appointmentDate: appointment.scheduledDate,
+            appointmentTime: appointment.scheduledTime,
+            scheduledDate: appointment.scheduledDate,
+            scheduledTime: appointment.scheduledTime,
+            status: appointment.status,
+          })),
+        });
       }
 
       if (pathname === '/appointments') {
@@ -503,10 +615,15 @@ describe('Telehealth frontend routes', () => {
               role: 'doctor',
               status: 'ACTIVE',
               specialty: body.specialty,
+              qualificationTitle: body.qualification_title,
+              qualificationCode: body.qualification_title,
               phone: body.phone,
               bio: body.bio,
               availabilitySummary: body.availability_summary,
               consultationFee: body.consultation_fee,
+              yearsOfExperience: body.years_of_experience,
+              gender: body.gender,
+              languagesSpoken: body.languages_spoken,
             },
           }, 201);
         }
@@ -639,7 +756,7 @@ describe('Telehealth frontend routes', () => {
       expect.stringContaining('/auth/login'),
       expect.objectContaining({
         method: 'POST',
-        body: JSON.stringify({ email: 'doctor@example.com', password: 'password123' }),
+        body: JSON.stringify({ phone: '0900000002', password: 'password123' }),
       }),
     );
   });
@@ -647,6 +764,7 @@ describe('Telehealth frontend routes', () => {
   it('loads doctors from the API and posts appointment booking requests', async () => {
     localStorage.setItem('telehealth_token', 'test-token-patient');
     renderRoute('/patient/book');
+    const todayUtc = new Date().toISOString().slice(0, 10);
 
     expect((await screen.findAllByText(/dr\. api heart/i)).length).toBeGreaterThan(0);
     expect(await screen.findByRole('option', { name: /09:00/i })).toBeInTheDocument();
@@ -661,7 +779,7 @@ describe('Telehealth frontend routes', () => {
           method: 'POST',
           body: JSON.stringify({
             doctorId: 2,
-            scheduledDate: '2026-05-07',
+            scheduledDate: todayUtc,
             scheduledTime: '09:00',
             reason: 'Headache and mild fever for 2 days. Requesting remote consultation.',
           }),
@@ -686,25 +804,89 @@ describe('Telehealth frontend routes', () => {
     expect(await screen.findByText(/already submitted/i)).toBeInTheDocument();
   });
 
-  it('filters doctors on the booking page by specialty, name, date, and max fee', async () => {
+  it('renders healthcare-oriented doctor discovery filters and selected doctor cards', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-patient');
+    renderRoute('/patient/book');
+
+    expect(await screen.findByRole('combobox', { name: /specialty/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /all specialties/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /cardiology/i })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /qualification/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /specialist level ii/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/available today/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/next 3 days/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/this week/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/video consultation available/i)).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /sort doctors/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /search doctors/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /clear filters/i })).toBeInTheDocument();
+    expect(screen.getAllByText(/video consultation/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/specialist level ii/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/327 reviews/i).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/12 years/i).length).toBeGreaterThan(0);
+    expect(screen.getByText(/\$35/i)).toBeInTheDocument();
+  });
+
+  it('filters doctors on the booking page by specialty, name, date, fee, video support, and sort', async () => {
     localStorage.setItem('telehealth_token', 'test-token-patient');
     renderRoute('/patient/book');
 
     expect(await screen.findByLabelText(/doctor name/i)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(/doctor name/i), { target: { value: 'Heart' } });
-    fireEvent.change(screen.getByLabelText(/specialty/i), { target: { value: 'Cardiology' } });
+    fireEvent.change(screen.getByLabelText(/specialty/i), { target: { value: 'CARDIOLOGY' } });
+    fireEvent.change(screen.getByLabelText(/qualification/i), { target: { value: 'SPECIALIST_LEVEL_II' } });
+    fireEvent.change(screen.getByLabelText(/minimum fee/i), { target: { value: '10' } });
     fireEvent.change(screen.getByLabelText(/maximum fee/i), { target: { value: '40' } });
-    fireEvent.change(screen.getByLabelText(/date/i), { target: { value: '2026-05-07' } });
-    fireEvent.click(screen.getByRole('button', { name: /apply doctor filters/i }));
+    fireEvent.change(screen.getByLabelText(/minimum experience/i), { target: { value: '10' } });
+    fireEvent.change(screen.getByLabelText(/minimum rating/i), { target: { value: '4.5' } });
+    fireEvent.change(screen.getByLabelText(/gender/i), { target: { value: 'Male' } });
+    fireEvent.change(screen.getByLabelText(/language/i), { target: { value: 'English' } });
+    fireEvent.change(screen.getByLabelText(/available date/i), { target: { value: '2026-05-07' } });
+    fireEvent.click(screen.getByLabelText(/available today/i));
+    fireEvent.click(screen.getByLabelText(/next 3 days/i));
+    fireEvent.click(screen.getByLabelText(/this week/i));
+    fireEvent.click(screen.getByLabelText(/video consultation available/i));
+    fireEvent.change(screen.getByLabelText(/sort doctors/i), { target: { value: 'lowest_fee' } });
+    fireEvent.click(screen.getByRole('button', { name: /search doctors/i }));
 
     await waitFor(() => {
       const doctorFilterCall = fetch.mock.calls.find(([url]) => {
         const value = String(url);
-        return value.includes('/doctors?') && value.includes('specialty=Cardiology') && value.includes('q=Heart') && value.includes('maxFee=40') && value.includes('date=2026-05-07');
+        return value.includes('/doctors?')
+          && value.includes('specialty=CARDIOLOGY')
+          && value.includes('qualificationTitle=SPECIALIST_LEVEL_II')
+          && value.includes('q=Heart')
+          && value.includes('minFee=10')
+          && value.includes('maxFee=40')
+          && value.includes('minExperience=10')
+          && value.includes('minRating=4.5')
+          && value.includes('gender=Male')
+          && value.includes('language=English')
+          && value.includes('date=2026-05-07')
+          && value.includes('availableToday=true')
+          && value.includes('availableNext3Days=true')
+          && value.includes('availableThisWeek=true')
+          && value.includes('videoAvailable=true')
+          && value.includes('sort=lowest_fee');
       });
       expect(doctorFilterCall).toBeTruthy();
     });
     expect((await screen.findAllByText(/dr\. api heart/i)).length).toBeGreaterThan(0);
+  });
+
+  it('clears doctor filters and shows an empty state when no doctors match', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-patient');
+    renderRoute('/patient/book');
+
+    expect(await screen.findByLabelText(/doctor name/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/doctor name/i), { target: { value: 'No Match Provider' } });
+    fireEvent.click(screen.getByRole('button', { name: /search doctors/i }));
+
+    expect(await screen.findByText(/no doctors match your filters/i)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
+    expect(screen.getByLabelText(/doctor name/i)).toHaveValue('');
+    expect(screen.getByLabelText(/specialty/i)).toHaveValue('');
   });
 
   it('submits the generated symptom summary to the backend API', async () => {
@@ -741,7 +923,7 @@ describe('Telehealth frontend routes', () => {
     renderRoute('/patient');
 
     expect(screen.getByRole('heading', { name: /patient dashboard/i })).toBeInTheDocument();
-    expect(screen.getByText(/upcoming appointment/i)).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: /upcoming appointments/i })).toBeInTheDocument();
     expect(screen.getByText(/recent medical records/i)).toBeInTheDocument();
     expect(await screen.findByText(/api blood test/i)).toBeInTheDocument();
   });
@@ -782,21 +964,22 @@ describe('Telehealth frontend routes', () => {
     });
   });
 
-  it('navigates from patient dashboard statistic cards', async () => {
+  it('navigates from patient dashboard upcoming appointments and quick actions', async () => {
     const appointmentsView = renderRoute('/patient');
 
-    fireEvent.click(screen.getByRole('link', { name: /appointments statistic/i }));
-    expect(await screen.findByRole('heading', { name: /book appointment/i })).toBeInTheDocument();
+    fireEvent.click(await screen.findByRole('link', { name: /view all appointments/i }));
+    expect(await screen.findByRole('heading', { name: /my appointments/i })).toBeInTheDocument();
     appointmentsView.unmount();
 
     const recordsView = renderRoute('/patient');
-    fireEvent.click(screen.getByRole('link', { name: /medical records statistic/i }));
+    fireEvent.click(await screen.findByRole('link', { name: /upload record/i }));
     expect(await screen.findByRole('heading', { name: /^medical records$/i })).toBeInTheDocument();
     recordsView.unmount();
 
     renderRoute('/patient');
-    fireEvent.click(screen.getByRole('link', { name: /consultation results statistic/i }));
-    expect(await screen.findByRole('heading', { level: 1, name: /patient consultation result/i })).toBeInTheDocument();
+    await screen.findAllByRole('link', { name: /book appointment/i });
+    fireEvent.click(screen.getAllByRole('link', { name: /book appointment/i })[0]);
+    expect(await screen.findByRole('heading', { name: /book appointment/i })).toBeInTheDocument();
   });
 
   it('renders doctor dashboard workload table', async () => {
@@ -868,9 +1051,10 @@ describe('Telehealth frontend routes', () => {
 
   it('exposes calendar export links for patient and doctor appointments', async () => {
     localStorage.setItem('telehealth_token', 'test-token-patient');
-    const patientView = renderRoute('/patient');
+    const patientView = renderRoute('/patient/appointments');
 
-    expect(await screen.findByRole('link', { name: /add upcoming appointment to calendar/i })).toHaveAttribute('href', 'http://localhost:4000/appointments/10/calendar.ics');
+    const patientCalendarLinks = await screen.findAllByRole('link', { name: /add appointment to calendar/i });
+    expect(patientCalendarLinks[0]).toHaveAttribute('href', 'http://localhost:4000/appointments/10/calendar.ics');
     patientView.unmount();
 
     localStorage.setItem('telehealth_token', 'test-token-doctor');
@@ -878,6 +1062,36 @@ describe('Telehealth frontend routes', () => {
 
     expect(await screen.findByText(/minh tran/i)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: /add appointment to calendar/i })).toHaveAttribute('href', 'http://localhost:4000/appointments/14/calendar.ics');
+  });
+
+  it('lets patients submit a doctor review only from a completed appointment card', async () => {
+    const originalAppointment = { ...apiAppointments[0] };
+    Object.assign(apiAppointments[0], { status: 'COMPLETED' });
+
+    localStorage.setItem('telehealth_token', 'test-token-patient');
+    renderRoute('/patient/appointments');
+
+    expect(await screen.findByRole('button', { name: /submit review/i })).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/^rating$/i), { target: { value: '5' } });
+    fireEvent.change(screen.getByLabelText(/^review$/i), { target: { value: 'Doctor explained clearly.' } });
+    fireEvent.click(screen.getByRole('button', { name: /submit review/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/doctors/2/reviews'),
+        expect.objectContaining({
+          method: 'POST',
+          body: JSON.stringify({
+            appointmentId: 10,
+            rating: 5,
+            comment: 'Doctor explained clearly.',
+          }),
+        }),
+      );
+    });
+
+    expect(await screen.findByText(/doctor review submitted/i)).toBeInTheDocument();
+    Object.assign(apiAppointments[0], originalAppointment);
   });
 
   it('lets patients open the video room for a confirmed consultation inside the access window', async () => {
@@ -1106,10 +1320,14 @@ describe('Telehealth frontend routes', () => {
     fireEvent.change(screen.getByLabelText(/full name/i), { target: { value: 'Dr. Created User' } });
     fireEvent.change(screen.getByLabelText(/email/i), { target: { value: 'created-doctor@example.com' } });
     fireEvent.change(screen.getByLabelText(/^password/i), { target: { value: 'doctor123' } });
-    fireEvent.change(screen.getByLabelText(/specialty/i), { target: { value: 'Pediatrics' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /qualification/i }), { target: { value: 'SPECIALIST_LEVEL_I' } });
+    fireEvent.change(screen.getByRole('combobox', { name: /specialty/i }), { target: { value: 'PEDIATRICS' } });
     fireEvent.change(screen.getByLabelText(/phone/i), { target: { value: '0911111111' } });
     fireEvent.change(screen.getByLabelText(/bio/i), { target: { value: 'Pediatric telehealth doctor.' } });
     fireEvent.change(screen.getByLabelText(/consultation fee/i), { target: { value: '50' } });
+    fireEvent.change(screen.getByLabelText(/years of experience/i), { target: { value: '8' } });
+    fireEvent.change(screen.getByLabelText(/gender/i), { target: { value: 'Female' } });
+    fireEvent.change(screen.getByLabelText(/languages spoken/i), { target: { value: 'Vietnamese, English' } });
     fireEvent.click(screen.getByRole('button', { name: /create doctor/i }));
 
     await waitFor(() => {
@@ -1121,10 +1339,14 @@ describe('Telehealth frontend routes', () => {
             full_name: 'Dr. Created User',
             email: 'created-doctor@example.com',
             password: 'doctor123',
-            specialty: 'Pediatrics',
+            qualification_title: 'SPECIALIST_LEVEL_I',
+            specialty: 'PEDIATRICS',
             phone: '0911111111',
             bio: 'Pediatric telehealth doctor.',
             consultation_fee: 50,
+            years_of_experience: 8,
+            gender: 'Female',
+            languages_spoken: 'Vietnamese, English',
           }),
         }),
       );
@@ -1288,7 +1510,7 @@ describe('Telehealth frontend routes', () => {
     renderRoute('/patient/book');
 
     expect(await screen.findByRole('option', { name: /09:00/i })).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText(/date/i), { target: { value: '2026-05-19' } });
+    fireEvent.change(screen.getByLabelText(/appointment date/i), { target: { value: '2026-05-19' } });
 
     expect(await screen.findByText(/no available slots for this doctor and date/i)).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /no available slots/i })).toBeInTheDocument();
