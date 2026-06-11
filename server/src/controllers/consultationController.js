@@ -7,14 +7,14 @@ export async function getConsultations(req, res) {
 }
 
 export async function postConsultation(req, res) {
-  const consultation = await createConsultation(req.user, req.body);
+  const { consultation, created } = await createConsultation(req.user, req.body);
   await createAuditLog({
     actor: req.user,
-    action: 'consultation_note.created',
+    action: created ? 'consultation_note.created' : 'consultation_note.updated',
     entityType: 'consultation_note',
     entityId: consultation.id,
     metadata: { appointmentId: consultation.appointmentId, patientId: consultation.patientId },
     ipAddress: req.ip,
   });
-  return sendSuccess(res, { consultation }, 201);
+  return sendSuccess(res, { consultation }, created ? 201 : 200);
 }

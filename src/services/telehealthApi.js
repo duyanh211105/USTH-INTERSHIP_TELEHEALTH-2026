@@ -217,8 +217,8 @@ export function updateUserStatus(userId, status) {
   }).then((data) => data.user);
 }
 
-export function getAdminLeaveRequests() {
-  return apiRequest('/admin/leave-requests').then((data) => data.leaveRequests || []);
+export function getAdminLeaveRequests(params = {}) {
+  return apiRequest(`/admin/leave-requests${toQueryString(params)}`).then((data) => data.leaveRequests || []);
 }
 
 export function getAdminAuditLogs(params = {}) {
@@ -231,8 +231,9 @@ export function approveAdminLeaveRequest(id) {
   }).then((data) => data.leaveRequest);
 }
 
-export function rejectAdminLeaveRequest(id) {
+export function rejectAdminLeaveRequest(id, rejectionReason = '') {
   return apiRequest(`/admin/leave-requests/${id}/reject`, {
     method: 'POST',
+    body: { rejectionReason },
   }).then((data) => data.leaveRequest);
 }

@@ -88,6 +88,9 @@ const apiLeaveRequests = [
     id: 31,
     doctorId: 2,
     doctorName: 'Dr. API Heart',
+    doctorRole: 'doctor',
+    departmentId: 'CARDIOLOGY',
+    departmentName: 'Cardiology',
     date: '2026-05-19',
     reason: 'Family leave',
     note: 'School event',
@@ -167,6 +170,17 @@ const apiAppointments = [
     scheduledTime: '15:00',
     reason: 'New intake appointment',
     status: 'PENDING',
+  },
+  {
+    id: 19,
+    patientId: 7,
+    doctorId: 2,
+    patientName: 'Reschedule Case',
+    doctorName: 'Dr. API Heart',
+    scheduledDate: '2026-05-10',
+    scheduledTime: '09:00',
+    reason: 'Appointment requires rescheduling after approved leave',
+    status: 'RESCHEDULE_REQUIRED',
   },
 ];
 
@@ -272,12 +286,14 @@ describe('Telehealth frontend routes', () => {
           ? 'doctor'
           : body.phone === '0123456789'
             ? 'admin'
-            : 'patient';
+            : body.phone === '0910000001'
+              ? 'department_head'
+              : 'patient';
 
         return mockApiResponse({
           token: `test-token-${role}`,
           user: {
-            id: role === 'doctor' ? 2 : role === 'admin' ? 3 : 1,
+            id: role === 'doctor' ? 2 : role === 'admin' ? 3 : role === 'department_head' ? 8 : 1,
             name: `${role} user`,
             email: `${role}@example.com`,
             phone: body.phone,
@@ -993,6 +1009,7 @@ describe('Telehealth frontend routes', () => {
     await waitFor(() => {
       expect(screen.getByRole('link', { name: /ava nguyen/i })).toHaveAttribute('href', '/doctor/patients/1');
       expect(screen.getByRole('link', { name: /minh tran/i })).toHaveAttribute('href', '/doctor/patients/4');
+      expect(screen.queryByText(/reschedule case/i)).not.toBeInTheDocument();
       expect(screen.getAllByRole('link', { name: /write note/i }).some((link) => link.getAttribute('href') === '/doctor/consultation/14')).toBe(true);
       expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/appointments'), expect.any(Object));
     });
@@ -1372,6 +1389,28 @@ describe('Telehealth frontend routes', () => {
 
     expect(await screen.findByText(/leave request approved/i)).toBeInTheDocument();
     expect(screen.getByText(/^APPROVED$/)).toBeInTheDocument();
+  });
+
+  it('lets department heads use specialty-based leave approval filters without doctor management tools', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-department-head');
+    localStorage.setItem('telehealth_user', JSON.stringify({ id: 8, role: 'department_head', name: 'Cardiology Head', email: 'head@example.com' }));
+    renderRoute('/admin/doctors');
+
+    expect((await screen.findAllByRole('heading', { name: /leave approval/i })).length).toBeGreaterThan(0);
+    expect(screen.queryByRole('heading', { name: /create doctor account/i })).not.toBeInTheDocument();
+    expect(await screen.findByText(/family leave/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/department/i), { target: { value: 'CARDIOLOGY' } });
+    fireEvent.change(screen.getByLabelText(/doctor name/i), { target: { value: 'API Heart' } });
+    fireEvent.change(screen.getByLabelText(/status/i), { target: { value: 'PENDING' } });
+    fireEvent.click(screen.getByRole('button', { name: /^filter$/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/admin/leave-requests?department=CARDIOLOGY&doctorName=API+Heart&status=PENDING'),
+        expect.any(Object),
+      );
+    });
   });
 
   it('lets admins reactivate and soft delete doctors', async () => {

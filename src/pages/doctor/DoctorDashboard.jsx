@@ -24,8 +24,9 @@ export default function DoctorDashboard() {
   const [cancellationReason, setCancellationReason] = useState('');
   const { toast, showToast } = useToast();
   const today = new Date().toISOString().slice(0, 10);
-  const todayAppointments = doctorAppointments.filter((appointment) => appointment.scheduledDate === today);
-  const pendingAppointments = doctorAppointments.filter((appointment) => appointment.status === 'PENDING');
+  const activeWorkflowAppointments = doctorAppointments.filter((appointment) => appointment.status !== 'RESCHEDULE_REQUIRED');
+  const todayAppointments = activeWorkflowAppointments.filter((appointment) => appointment.scheduledDate === today);
+  const pendingAppointments = activeWorkflowAppointments.filter((appointment) => appointment.status === 'PENDING');
   const completedAppointments = doctorAppointments.filter((appointment) => appointment.status === 'COMPLETED');
 
   useEffect(() => {
@@ -225,7 +226,7 @@ export default function DoctorDashboard() {
                 ),
               },
             ]}
-            rows={isLoadingAppointments || appointmentsError ? [] : doctorAppointments}
+            rows={isLoadingAppointments || appointmentsError ? [] : activeWorkflowAppointments}
             getRowKey={(row) => row.id}
           />
           {isLoadingAppointments ? (
@@ -238,7 +239,7 @@ export default function DoctorDashboard() {
               {appointmentsError}
             </div>
           ) : null}
-          {!isLoadingAppointments && !appointmentsError && doctorAppointments.length === 0 ? (
+          {!isLoadingAppointments && !appointmentsError && activeWorkflowAppointments.length === 0 ? (
             <div className="mt-4">
               <EmptyState title="No appointments assigned yet" description="Assigned patient appointments will appear here once patients book your available slots." />
             </div>

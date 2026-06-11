@@ -57,6 +57,10 @@ export async function createConsultation(user, data) {
   }
 
   const { appointmentId, symptoms, diagnosis, prescription, advice, followUp } = data;
+  if (!appointmentId) {
+    throw new ApiError(400, 'appointmentId is required');
+  }
+
   const appointment = await getAppointmentById(appointmentId);
 
   if (!appointment) {
@@ -67,24 +71,55 @@ export async function createConsultation(user, data) {
     throw new ApiError(403, 'Doctors can only write notes for assigned appointments');
   }
 
+  if (data.doctorId && Number(data.doctorId) !== Number(appointment.doctorId)) {
+    throw new ApiError(400, 'doctorId must match the appointment doctor');
+  }
+
+  if (data.patientId && Number(data.patientId) !== Number(appointment.patientId)) {
+    throw new ApiError(400, 'patientId must match the appointment patient');
+  }
+
   if (!symptoms || !diagnosis || !prescription || !advice || !followUp) {
     throw new ApiError(400, 'consultation note fields are required');
   }
 
-  const result = await getDatabase()
-    .prepare(`
-      INSERT INTO consultation_notes (
-        appointment_id, doctor_id, patient_id, symptoms, diagnosis, prescription, advice, follow_up
-      )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `)
-    .run(appointment.id, appointment.doctorId, appointment.patientId, symptoms, diagnosis, prescription, advice, followUp);
+  const existingNote = await getDatabase()
+    .prepare('SELECT id FROM consultation_notes WHERE appointment_id = ?')
+    .get(appointment.id);
+  let noteId = existingNote ? Number(existingNote.id) : null;
+
+  if (existingNote) {
+    await getDatabase()
+      .prepare(`
+        UPDATE consultation_notes
+        SET symptoms = ?,
+            diagnosis = ?,
+            prescription = ?,
+            advice = ?,
+            follow_up = ?
+        WHERE id = ?
+      `)
+      .run(symptoms, diagnosis, prescription, advice, followUp, noteId);
+  } else {
+    const result = await getDatabase()
+      .prepare(`
+        INSERT INTO consultation_notes (
+          appointment_id, doctor_id, patient_id, symptoms, diagnosis, prescription, advice, follow_up
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      .run(appointment.id, appointment.doctorId, appointment.patientId, symptoms, diagnosis, prescription, advice, followUp);
+    noteId = Number(result.lastInsertRowid);
+  }
 
   await getDatabase().prepare("UPDATE appointments SET status = 'COMPLETED' WHERE id = ?").run(appointment.id);
 
-  return mapConsultation(
-    await getDatabase()
-      .prepare(`${consultationSelect} WHERE c.id = ?`)
-      .get(Number(result.lastInsertRowid)),
-  );
+  return {
+    consultation: mapConsultation(
+      await getDatabase()
+        .prepare(`${consultationSelect} WHERE c.id = ?`)
+        .get(noteId),
+    ),
+    created: !existingNote,
+  };
 }

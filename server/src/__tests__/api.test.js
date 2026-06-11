@@ -98,6 +98,41 @@ describe('telehealth backend API', () => {
     return Number(result.lastInsertRowid);
   }
 
+  async function createMedicalStaff({
+    name,
+    email,
+    phone,
+    role,
+    specialty = 'Cardiology',
+  }) {
+    const passwordHash = (await getDatabase()
+      .prepare("SELECT password_hash FROM users WHERE phone = '0900000002'")
+      .get()).password_hash;
+
+    const userResult = getDatabase()
+      .prepare(`
+        INSERT INTO users (name, email, password_hash, phone, role, status)
+        VALUES (?, ?, ?, ?, ?, 'ACTIVE')
+      `)
+      .run(name, email, passwordHash, phone, role);
+    const userId = Number(userResult.lastInsertRowid);
+
+    getDatabase()
+      .prepare(`
+        INSERT INTO doctor_profiles (
+          user_id, specialty, bio, availability, availability_summary, consultation_fee,
+          qualification_title, years_of_experience, gender, languages_spoken
+        )
+        VALUES (?, ?, '', '', '', 0, 'GENERAL_PRACTITIONER', 0, '', '')
+      `)
+      .run(userId, specialty);
+
+    return {
+      id: userId,
+      token: await login(phone),
+    };
+  }
+
   before(async () => {
     await initializeDatabase();
     await seedDatabase();
@@ -958,6 +993,8 @@ describe('telehealth backend API', () => {
   });
 
   it('blocks booking slots only after admin approves doctor leave requests', async () => {
+    const leaveDate = nextUtcDateForWeekday(2);
+
     await request(app)
       .put('/doctors/me/availability')
       .set('Authorization', `Bearer ${doctorToken}`)
@@ -971,23 +1008,32 @@ describe('telehealth backend API', () => {
     await request(app)
       .post('/leave-requests')
       .set('Authorization', `Bearer ${doctorToken}`)
-      .send({ date: '2026-05-19', reason: 'Personal leave', note: 'Family appointment' })
+      .send({ date: leaveDate, reason: 'Personal leave', note: 'Family appointment' })
       .expect(201);
 
     const pendingSlots = await request(app)
-      .get(`/doctors/${doctorId}/slots?date=2026-05-19`)
+      .get(`/doctors/${doctorId}/slots?date=${leaveDate}`)
       .set('Authorization', `Bearer ${patientToken}`)
       .expect(200);
 
     assert.deepEqual(pendingSlots.body.data.slots.map((slot) => slot.time), ['15:00', '15:30']);
 
+    const appointmentResult = getDatabase()
+      .prepare(`
+        INSERT INTO appointments (patient_id, doctor_id, scheduled_date, scheduled_time, reason, status)
+        VALUES (?, ?, ?, ?, ?, 'CONFIRMED')
+      `)
+      .run(patientId, doctorId, leaveDate, '15:00', 'Leave conflict appointment');
+    const appointmentId = Number(appointmentResult.lastInsertRowid);
+
     const leaveRequests = await request(app)
       .get('/admin/leave-requests')
       .set('Authorization', `Bearer ${adminToken}`)
       .expect(200);
-    const leaveRequest = leaveRequests.body.data.leaveRequests.find((item) => item.date === '2026-05-19');
+    const leaveRequest = leaveRequests.body.data.leaveRequests.find((item) => item.date === leaveDate);
 
     assert.equal(leaveRequest.status, 'PENDING');
+    assert.ok(leaveRequest.departmentId);
 
     const approved = await request(app)
       .post(`/admin/leave-requests/${leaveRequest.id}/approve`)
@@ -995,13 +1041,156 @@ describe('telehealth backend API', () => {
       .expect(200);
 
     assert.equal(approved.body.data.leaveRequest.status, 'APPROVED');
+    assert.equal(approved.body.data.leaveRequest.rescheduledAppointmentIds.includes(appointmentId), true);
 
     const blockedSlots = await request(app)
-      .get(`/doctors/${doctorId}/slots?date=2026-05-19`)
+      .get(`/doctors/${doctorId}/slots?date=${leaveDate}`)
       .set('Authorization', `Bearer ${patientToken}`)
       .expect(200);
 
     assert.deepEqual(blockedSlots.body.data.slots, []);
+
+    const rescheduledAppointment = await request(app)
+      .get('/appointments')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    const appointment = rescheduledAppointment.body.data.appointments.find((item) => item.id === appointmentId);
+    assert.equal(appointment.status, 'RESCHEDULE_REQUIRED');
+
+    const upcoming = await request(app)
+      .get('/appointments/upcoming')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    assert.equal(upcoming.body.data.appointments.some((item) => item.id === appointmentId), false);
+
+    const auditLogs = await request(app)
+      .get('/admin/audit-logs?action=appointment_reschedule_required')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    assert.equal(auditLogs.body.data.logs.some((item) => item.entityId === appointmentId), true);
+  });
+
+  it('enforces hierarchical leave approval permissions by specialty and target role', async () => {
+    const cardiologyHead = await createMedicalStaff({
+      name: 'Cardiology Head',
+      email: 'cardiology-head@example.com',
+      phone: '0910000001',
+      role: 'department_head',
+      specialty: 'Cardiology',
+    });
+    const dermatologyHead = await createMedicalStaff({
+      name: 'Dermatology Head',
+      email: 'dermatology-head@example.com',
+      phone: '0910000002',
+      role: 'department_head',
+      specialty: 'Dermatology',
+    });
+    const hospitalDirector = await createMedicalStaff({
+      name: 'Hospital Director',
+      email: 'director@example.com',
+      phone: '0910000003',
+      role: 'hospital_director',
+      specialty: 'General Medicine',
+    });
+
+    const doctorLeaveDate = nextUtcDateForWeekday(3);
+    await request(app)
+      .post('/leave-requests')
+      .set('Authorization', `Bearer ${doctorToken}`)
+      .send({ date: doctorLeaveDate, reason: 'Conference leave', note: 'Cardiology event' })
+      .expect(201);
+
+    const cardiologyHeadView = await request(app)
+      .get(`/admin/leave-requests?department=CARDIOLOGY&status=PENDING&doctorName=Adrian&date=${doctorLeaveDate}`)
+      .set('Authorization', `Bearer ${cardiologyHead.token}`)
+      .expect(200);
+    const doctorLeave = cardiologyHeadView.body.data.leaveRequests.find((item) => item.date === doctorLeaveDate);
+    assert.ok(doctorLeave);
+    assert.equal(doctorLeave.departmentId, 'CARDIOLOGY');
+    assert.equal(doctorLeave.doctorRole, 'doctor');
+
+    const dermatologyHeadView = await request(app)
+      .get(`/admin/leave-requests?department=CARDIOLOGY&status=PENDING&date=${doctorLeaveDate}`)
+      .set('Authorization', `Bearer ${dermatologyHead.token}`)
+      .expect(200);
+    assert.equal(dermatologyHeadView.body.data.leaveRequests.some((item) => item.id === doctorLeave.id), false);
+
+    await request(app)
+      .post(`/admin/leave-requests/${doctorLeave.id}/approve`)
+      .set('Authorization', `Bearer ${dermatologyHead.token}`)
+      .expect(403);
+
+    const approvedByHead = await request(app)
+      .post(`/admin/leave-requests/${doctorLeave.id}/approve`)
+      .set('Authorization', `Bearer ${cardiologyHead.token}`)
+      .expect(200);
+    assert.equal(approvedByHead.body.data.leaveRequest.reviewedBy, cardiologyHead.id);
+
+    const headLeaveDate = nextUtcDateForWeekday(4);
+    await request(app)
+      .post('/leave-requests')
+      .set('Authorization', `Bearer ${cardiologyHead.token}`)
+      .send({ date: headLeaveDate, reason: 'Department leadership leave', note: 'Annual leave' })
+      .expect(201);
+
+    const directorView = await request(app)
+      .get(`/admin/leave-requests?department=CARDIOLOGY&status=PENDING&date=${headLeaveDate}`)
+      .set('Authorization', `Bearer ${hospitalDirector.token}`)
+      .expect(200);
+    const headLeave = directorView.body.data.leaveRequests.find((item) => item.date === headLeaveDate);
+    assert.ok(headLeave);
+    assert.equal(headLeave.doctorRole, 'department_head');
+
+    await request(app)
+      .post(`/admin/leave-requests/${headLeave.id}/approve`)
+      .set('Authorization', `Bearer ${cardiologyHead.token}`)
+      .expect(403);
+
+    const approvedByDirector = await request(app)
+      .post(`/admin/leave-requests/${headLeave.id}/approve`)
+      .set('Authorization', `Bearer ${hospitalDirector.token}`)
+      .expect(200);
+    assert.equal(approvedByDirector.body.data.leaveRequest.reviewedBy, hospitalDirector.id);
+
+    const directorLeaveDate = nextUtcDateForWeekday(5);
+    await request(app)
+      .post('/leave-requests')
+      .set('Authorization', `Bearer ${hospitalDirector.token}`)
+      .send({ date: directorLeaveDate, reason: 'Executive leave', note: 'Board meeting' })
+      .expect(201);
+
+    const adminView = await request(app)
+      .get(`/admin/leave-requests?status=PENDING&date=${directorLeaveDate}`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    const directorLeave = adminView.body.data.leaveRequests.find((item) => item.date === directorLeaveDate);
+    assert.ok(directorLeave);
+    assert.equal(directorLeave.doctorRole, 'hospital_director');
+
+    await request(app)
+      .post(`/admin/leave-requests/${directorLeave.id}/approve`)
+      .set('Authorization', `Bearer ${hospitalDirector.token}`)
+      .expect(403);
+
+    const adminApproved = await request(app)
+      .post(`/admin/leave-requests/${directorLeave.id}/reject`)
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({ rejectionReason: 'Director coverage required' })
+      .expect(200);
+    assert.equal(adminApproved.body.data.leaveRequest.rejectionReason, 'Director coverage required');
+
+    const auditLogs = await request(app)
+      .get('/admin/audit-logs?action=LEAVE_REJECTED')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .expect(200);
+    assert.equal(
+      auditLogs.body.data.logs.some((item) => (
+        item.entityId === directorLeave.id
+        && item.metadata.reviewerId
+        && item.metadata.targetDoctorId === hospitalDirector.id
+      )),
+      true,
+    );
   });
 
   it('prevents patients from managing doctor availability', async () => {
@@ -1473,12 +1662,42 @@ describe('telehealth backend API', () => {
 
     assert.equal(created.body.data.consultation.appointmentId, appointment.body.data.appointment.id);
 
+    const updated = await request(app)
+      .post('/consultations')
+      .set('Authorization', `Bearer ${doctorToken}`)
+      .send({
+        appointmentId: appointment.body.data.appointment.id,
+        doctorId,
+        patientId,
+        symptoms: 'Headache and mild fever',
+        diagnosis: 'Updated clinical review after follow-up',
+        prescription: 'Continue hydration advice',
+        advice: 'Rest and monitor symptoms closely',
+        followUp: 'Follow up in one week if needed',
+      })
+      .expect(200);
+
+    assert.equal(updated.body.data.consultation.id, created.body.data.consultation.id);
+    assert.equal(updated.body.data.consultation.diagnosis, 'Updated clinical review after follow-up');
+
+    const noteCount = await getDatabase()
+      .prepare('SELECT COUNT(*) AS count FROM consultation_notes WHERE appointment_id = ?')
+      .get(appointment.body.data.appointment.id);
+    assert.equal(Number(noteCount.count), 1);
+
     const listed = await request(app)
       .get('/consultations')
       .set('Authorization', `Bearer ${patientToken}`)
       .expect(200);
 
     assert.ok(listed.body.data.consultations.length > 0);
+    assert.equal(
+      listed.body.data.consultations.some((item) => (
+        item.appointmentId === appointment.body.data.appointment.id
+        && item.diagnosis === 'Updated clinical review after follow-up'
+      )),
+      true,
+    );
   });
 
   it('returns admin summary, users, and appointments only for admins', async () => {

@@ -1,5 +1,7 @@
 import { getDatabase } from './connection.js';
 
+const userRoleCheckSql = "role IN ('patient', 'doctor', 'department_head', 'hospital_director', 'admin')";
+
 async function columnExists(db, table, column) {
   if (db.client === 'postgres') {
     const row = await db
@@ -51,7 +53,7 @@ async function migrateUserStatusConstraint(db) {
       phone TEXT NOT NULL DEFAULT '',
       national_id TEXT UNIQUE,
       permanent_address TEXT NOT NULL DEFAULT '',
-      role TEXT NOT NULL CHECK (role IN ('patient', 'doctor', 'admin')),
+      role TEXT NOT NULL CHECK (${userRoleCheckSql}),
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'DELETED')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -70,8 +72,173 @@ async function migrateUserStatusConstraint(db) {
   `);
 }
 
+async function migrateUserRoleConstraint(db) {
+  if (db.client === 'postgres') {
+    const outdatedConstraints = await db
+      .prepare(`
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'users'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%patient%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%department_head%'
+      `)
+      .all();
+
+    if (outdatedConstraints.length === 0) {
+      return;
+    }
+
+    for (const constraint of outdatedConstraints) {
+      const constraintName = String(constraint.conname).replace(/"/g, '""');
+      await db.exec(`ALTER TABLE users DROP CONSTRAINT IF EXISTS "${constraintName}";`);
+    }
+
+    await db.exec(`
+      ALTER TABLE users
+      ADD CONSTRAINT users_role_check
+      CHECK (${userRoleCheckSql});
+    `);
+    return;
+  }
+
+  if (db.client !== 'sqlite') {
+    return;
+  }
+
+  const usersTable = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'users'").get();
+
+  if (!usersTable?.sql || usersTable.sql.includes("'department_head'")) {
+    return;
+  }
+
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+
+    CREATE TABLE users_next (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      email TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      phone TEXT NOT NULL DEFAULT '',
+      national_id TEXT UNIQUE,
+      permanent_address TEXT NOT NULL DEFAULT '',
+      role TEXT NOT NULL CHECK (${userRoleCheckSql}),
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'DELETED')),
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    INSERT INTO users_next (
+      id, name, email, password_hash, phone, national_id, permanent_address, role, status, created_at
+    )
+    SELECT id, name, email, password_hash, phone, national_id, permanent_address, role, status, created_at
+    FROM users;
+
+    DROP TABLE users;
+    ALTER TABLE users_next RENAME TO users;
+
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+async function migrateAppointmentStatusConstraint(db) {
+  if (db.client === 'postgres') {
+    const outdatedConstraints = await db
+      .prepare(`
+        SELECT conname
+        FROM pg_constraint
+        WHERE conrelid = 'appointments'::regclass
+          AND contype = 'c'
+          AND pg_get_constraintdef(oid) LIKE '%PENDING%'
+          AND pg_get_constraintdef(oid) NOT LIKE '%RESCHEDULE_REQUIRED%'
+      `)
+      .all();
+
+    if (outdatedConstraints.length === 0) {
+      return;
+    }
+
+    for (const constraint of outdatedConstraints) {
+      const constraintName = String(constraint.conname).replace(/"/g, '""');
+      await db.exec(`ALTER TABLE appointments DROP CONSTRAINT IF EXISTS "${constraintName}";`);
+    }
+
+    await db.exec(`
+      ALTER TABLE appointments
+      ADD CONSTRAINT appointments_status_check
+      CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED'));
+    `);
+    return;
+  }
+
+  if (db.client !== 'sqlite') {
+    return;
+  }
+
+  const appointmentsTable = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'appointments'").get();
+
+  if (!appointmentsTable?.sql || appointmentsTable.sql.includes("'RESCHEDULE_REQUIRED'")) {
+    return;
+  }
+
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+
+    CREATE TABLE appointments_next (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      patient_id INTEGER NOT NULL,
+      doctor_id INTEGER NOT NULL,
+      scheduled_date TEXT NOT NULL,
+      scheduled_time TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED')),
+      cancellation_reason TEXT NOT NULL DEFAULT '',
+      cancelled_by INTEGER,
+      cancelled_at TEXT,
+      video_room_url TEXT,
+      video_room_provider TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (patient_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE,
+      FOREIGN KEY (cancelled_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+
+    INSERT INTO appointments_next (
+      id, patient_id, doctor_id, scheduled_date, scheduled_time, reason, status,
+      cancellation_reason, cancelled_by, cancelled_at, video_room_url, video_room_provider, created_at
+    )
+    SELECT
+      id, patient_id, doctor_id, scheduled_date, scheduled_time, reason, status,
+      cancellation_reason, cancelled_by, cancelled_at, video_room_url, video_room_provider, created_at
+    FROM appointments;
+
+    DROP TABLE appointments;
+    ALTER TABLE appointments_next RENAME TO appointments;
+
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+
+async function migrateDuplicateConsultationNotes(db) {
+  await db
+    .prepare(`
+      DELETE FROM consultation_notes
+      WHERE id NOT IN (
+        SELECT MAX(id)
+        FROM consultation_notes
+        GROUP BY appointment_id
+      )
+    `)
+    .run();
+}
+
 async function migrateExistingSchema(db) {
   await migrateUserStatusConstraint(db);
+  await migrateUserRoleConstraint(db);
   await addColumnIfMissing(db, 'users', 'phone', "TEXT NOT NULL DEFAULT ''");
   await addColumnIfMissing(db, 'users', 'national_id', 'TEXT');
   await addColumnIfMissing(db, 'users', 'permanent_address', "TEXT NOT NULL DEFAULT ''");
@@ -89,6 +256,9 @@ async function migrateExistingSchema(db) {
   await addColumnIfMissing(db, 'appointments', 'cancelled_at', db.client === 'postgres' ? 'TIMESTAMPTZ' : 'TEXT');
   await addColumnIfMissing(db, 'appointments', 'video_room_url', 'TEXT');
   await addColumnIfMissing(db, 'appointments', 'video_room_provider', 'TEXT');
+  await migrateAppointmentStatusConstraint(db);
+  await addColumnIfMissing(db, 'leave_requests', 'department_id', "TEXT NOT NULL DEFAULT ''");
+  await addColumnIfMissing(db, 'leave_requests', 'rejection_reason', "TEXT NOT NULL DEFAULT ''");
   await addColumnIfMissing(db, 'medical_records', 'appointment_id', db.client === 'postgres' ? 'BIGINT' : 'INTEGER');
   await addColumnIfMissing(db, 'medical_documents', 'storage_provider', "TEXT NOT NULL DEFAULT 'local'");
   await addColumnIfMissing(db, 'medical_documents', 'storage_key', "TEXT NOT NULL DEFAULT ''");
@@ -100,6 +270,7 @@ async function migrateExistingSchema(db) {
   await addColumnIfMissing(db, 'symptom_summaries', 'red_flags', db.client === 'postgres' ? "JSONB NOT NULL DEFAULT '[]'::jsonb" : "TEXT NOT NULL DEFAULT '[]'");
   await addColumnIfMissing(db, 'symptom_summaries', 'priority', "TEXT NOT NULL DEFAULT 'NORMAL'");
   await addColumnIfMissing(db, 'symptom_summaries', 'doctor_summary', "TEXT NOT NULL DEFAULT ''");
+  await migrateDuplicateConsultationNotes(db);
 }
 
 function buildGeneratedPhone(userId, attempt = 0) {
@@ -160,7 +331,7 @@ function sqliteSchemaSql() {
       phone TEXT NOT NULL DEFAULT '',
       national_id TEXT UNIQUE,
       permanent_address TEXT NOT NULL DEFAULT '',
-      role TEXT NOT NULL CHECK (role IN ('patient', 'doctor', 'admin')),
+      role TEXT NOT NULL CHECK (${userRoleCheckSql}),
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'DELETED')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
@@ -191,7 +362,7 @@ function sqliteSchemaSql() {
       scheduled_date TEXT NOT NULL,
       scheduled_time TEXT NOT NULL,
       reason TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED')),
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED')),
       cancellation_reason TEXT NOT NULL DEFAULT '',
       cancelled_by INTEGER,
       cancelled_at TEXT,
@@ -253,12 +424,14 @@ function sqliteSchemaSql() {
     CREATE TABLE IF NOT EXISTS leave_requests (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       doctor_id INTEGER NOT NULL,
+      department_id TEXT NOT NULL DEFAULT '',
       date TEXT NOT NULL,
       reason TEXT NOT NULL,
       note TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
       reviewed_by INTEGER,
       reviewed_at TEXT,
+      rejection_reason TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (doctor_id) REFERENCES users(id) ON DELETE CASCADE,
@@ -318,7 +491,7 @@ function sqliteSchemaSql() {
 
     CREATE TABLE IF NOT EXISTS consultation_notes (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      appointment_id INTEGER NOT NULL,
+      appointment_id INTEGER NOT NULL UNIQUE,
       doctor_id INTEGER NOT NULL,
       patient_id INTEGER NOT NULL,
       symptoms TEXT NOT NULL,
@@ -357,7 +530,7 @@ export function postgresSchemaSql() {
       phone TEXT NOT NULL DEFAULT '',
       national_id TEXT UNIQUE,
       permanent_address TEXT NOT NULL DEFAULT '',
-      role TEXT NOT NULL CHECK (role IN ('patient', 'doctor', 'admin')),
+      role TEXT NOT NULL CHECK (${userRoleCheckSql}),
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'INACTIVE', 'DELETED')),
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -387,7 +560,7 @@ export function postgresSchemaSql() {
       scheduled_date DATE NOT NULL,
       scheduled_time TIME NOT NULL,
       reason TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED')),
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED')),
       cancellation_reason TEXT NOT NULL DEFAULT '',
       cancelled_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
       cancelled_at TIMESTAMPTZ,
@@ -440,12 +613,14 @@ export function postgresSchemaSql() {
     CREATE TABLE IF NOT EXISTS leave_requests (
       id BIGSERIAL PRIMARY KEY,
       doctor_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      department_id TEXT NOT NULL DEFAULT '',
       date DATE NOT NULL,
       reason TEXT NOT NULL,
       note TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'APPROVED', 'REJECTED')),
       reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
       reviewed_at TIMESTAMPTZ,
+      rejection_reason TEXT NOT NULL DEFAULT '',
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
@@ -497,7 +672,7 @@ export function postgresSchemaSql() {
 
     CREATE TABLE IF NOT EXISTS consultation_notes (
       id BIGSERIAL PRIMARY KEY,
-      appointment_id BIGINT NOT NULL REFERENCES appointments(id) ON DELETE CASCADE,
+      appointment_id BIGINT NOT NULL UNIQUE REFERENCES appointments(id) ON DELETE CASCADE,
       doctor_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       patient_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       symptoms TEXT NOT NULL,
@@ -552,6 +727,12 @@ function indexAndCompatibilitySql() {
 
     CREATE INDEX IF NOT EXISTS idx_leave_requests_doctor_date_status
     ON leave_requests(doctor_id, date, status);
+
+    CREATE INDEX IF NOT EXISTS idx_leave_requests_department_date_status
+    ON leave_requests(department_id, date, status);
+
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_consultation_notes_appointment_unique
+    ON consultation_notes(appointment_id);
 
     CREATE INDEX IF NOT EXISTS idx_audit_logs_created_at
     ON audit_logs(created_at DESC, id DESC);

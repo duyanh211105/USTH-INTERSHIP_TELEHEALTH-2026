@@ -6,7 +6,7 @@ import { requireRole } from '../middleware/roles.js';
 
 const router = Router();
 
-router.get('/', requireAuth, requireRole('doctor'), asyncHandler(getMyLeaveRequests));
-router.post('/', requireAuth, requireRole('doctor'), asyncHandler(postLeaveRequest));
+router.get('/', requireAuth, requireRole('doctor', 'department_head', 'hospital_director'), asyncHandler(getMyLeaveRequests));
+router.post('/', requireAuth, requireRole('doctor', 'department_head', 'hospital_director'), asyncHandler(postLeaveRequest));
 
 export default router;

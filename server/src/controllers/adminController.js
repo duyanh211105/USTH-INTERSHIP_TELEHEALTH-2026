@@ -82,30 +82,45 @@ export async function deleteDoctor(req, res) {
 }
 
 export async function getLeaveRequests(req, res) {
-  return sendSuccess(res, { leaveRequests: await listLeaveRequestsForAdmin() });
+  return sendSuccess(res, { leaveRequests: await listLeaveRequestsForAdmin(req.user, req.query) });
 }
 
 export async function approveLeaveRequest(req, res) {
   const leaveRequest = await updateLeaveRequestStatus(req.params.id, 'APPROVED', req.user);
   await createAuditLog({
     actor: req.user,
-    action: 'leave_request.approved',
+    action: 'LEAVE_APPROVED',
     entityType: 'leave_request',
     entityId: leaveRequest.id,
-    metadata: { doctorId: leaveRequest.doctorId, date: leaveRequest.date },
+    metadata: {
+      leaveRequestId: leaveRequest.id,
+      reviewerId: req.user.id,
+      targetDoctorId: leaveRequest.doctorId,
+      oldStatus: leaveRequest.oldStatus,
+      newStatus: leaveRequest.status,
+      timestamp: new Date().toISOString(),
+    },
     ipAddress: req.ip,
   });
   return sendSuccess(res, { leaveRequest });
 }
 
 export async function rejectLeaveRequest(req, res) {
-  const leaveRequest = await updateLeaveRequestStatus(req.params.id, 'REJECTED', req.user);
+  const leaveRequest = await updateLeaveRequestStatus(req.params.id, 'REJECTED', req.user, req.body);
   await createAuditLog({
     actor: req.user,
-    action: 'leave_request.rejected',
+    action: 'LEAVE_REJECTED',
     entityType: 'leave_request',
     entityId: leaveRequest.id,
-    metadata: { doctorId: leaveRequest.doctorId, date: leaveRequest.date },
+    metadata: {
+      leaveRequestId: leaveRequest.id,
+      reviewerId: req.user.id,
+      targetDoctorId: leaveRequest.doctorId,
+      oldStatus: leaveRequest.oldStatus,
+      newStatus: leaveRequest.status,
+      rejectionReason: leaveRequest.rejectionReason,
+      timestamp: new Date().toISOString(),
+    },
     ipAddress: req.ip,
   });
   return sendSuccess(res, { leaveRequest });

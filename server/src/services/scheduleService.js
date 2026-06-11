@@ -228,8 +228,17 @@ export async function isDoctorUnavailable(doctorId, date) {
   assertDate(date);
   return Boolean(
     await getDatabase()
-      .prepare("SELECT id FROM leave_requests WHERE doctor_id = ? AND date = ? AND status = 'APPROVED'")
-      .get(doctorId, date),
+      .prepare(`
+        SELECT id
+        FROM doctor_unavailability
+        WHERE doctor_id = ? AND date = ?
+        UNION
+        SELECT id
+        FROM leave_requests
+        WHERE doctor_id = ? AND date = ? AND status = 'APPROVED'
+        LIMIT 1
+      `)
+      .get(doctorId, date, doctorId, date),
   );
 }
 

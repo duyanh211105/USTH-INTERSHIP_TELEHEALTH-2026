@@ -43,6 +43,20 @@ const people = {
   admin: { name: 'Admin User', subtitle: 'System admin' },
 };
 
+const adminLikeRoles = new Set(['admin', 'department_head', 'hospital_director']);
+
+function roleSubtitle(role, fallback) {
+  const subtitles = {
+    patient: 'Patient account',
+    doctor: fallback || 'Doctor account',
+    department_head: 'Department head',
+    hospital_director: 'Hospital director',
+    admin: 'System admin',
+  };
+
+  return subtitles[role] || fallback || 'User account';
+}
+
 function SidebarLink({ item }) {
   const Icon = item.icon;
 
@@ -65,15 +79,13 @@ function SidebarLink({ item }) {
 }
 
 export default function DashboardLayout({ role, title, subtitle, children, actions }) {
-  const navItems = navigation[role];
   const storedUser = getStoredUser();
-  const roleSubtitles = {
-    patient: 'Patient account',
-    doctor: storedUser?.specialty || 'Doctor account',
-    admin: 'System admin',
-  };
-  const user = storedUser?.role === role
-    ? { name: storedUser.name, subtitle: roleSubtitles[role] }
+  const navItems = role === 'admin' && storedUser?.role !== 'admin' && adminLikeRoles.has(storedUser?.role)
+    ? [{ label: 'Leave Approvals', to: '/admin/doctors', icon: CalendarClock }]
+    : navigation[role];
+  const roleMatchesLayout = storedUser?.role === role || (role === 'admin' && adminLikeRoles.has(storedUser?.role));
+  const user = roleMatchesLayout
+    ? { name: storedUser.name, subtitle: roleSubtitle(storedUser.role, storedUser?.specialty) }
     : people[role];
 
   return (

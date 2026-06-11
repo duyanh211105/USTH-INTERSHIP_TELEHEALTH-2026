@@ -1,4 +1,4 @@
-import { Ban, CheckCircle2, Edit3, Plus, Stethoscope, UserPlus, XCircle } from 'lucide-react';
+import { Ban, CheckCircle2, Edit3, Filter, Plus, Stethoscope, UserPlus, XCircle } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import Button from '../../components/Button.jsx';
 import Card, { CardBody, CardHeader } from '../../components/Card.jsx';
@@ -11,6 +11,7 @@ import { DOCTOR_QUALIFICATIONS, getQualificationLabel, normalizeQualificationCod
 import { SPECIALTIES, getSpecialtyLabel, normalizeSpecialtyCode } from '../../constants/specialties.js';
 import DashboardLayout from '../../layouts/DashboardLayout.jsx';
 import useToast from '../../hooks/useToast.js';
+import { getStoredUser } from '../../services/apiClient.js';
 import {
   createAdminDoctor,
   approveAdminLeaveRequest,
@@ -36,6 +37,13 @@ const emptyForm = {
   languages_spoken: '',
 };
 
+const emptyLeaveFilters = {
+  department: '',
+  doctorName: '',
+  status: '',
+  date: '',
+};
+
 function doctorAvailability(doctor) {
   return doctor.availabilitySummary || doctor.availability || 'Schedule not set';
 }
@@ -59,11 +67,18 @@ function doctorQualification(doctor) {
 }
 
 export default function AdminDoctorManagementPage() {
+  const storedUser = getStoredUser();
+  const canManageDoctors = storedUser?.role === 'admin';
   const [doctors, setDoctors] = useState([]);
   const [leaveRequests, setLeaveRequests] = useState([]);
+  const [leaveFilters, setLeaveFilters] = useState(() => ({
+    ...emptyLeaveFilters,
+    status: canManageDoctors ? '' : 'PENDING',
+  }));
   const [form, setForm] = useState(emptyForm);
   const [editingDoctor, setEditingDoctor] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
+  const [isLoadingLeaveRequests, setIsLoadingLeaveRequests] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [statusUpdatingId, setStatusUpdatingId] = useState(null);
   const [leaveUpdatingId, setLeaveUpdatingId] = useState(null);
@@ -71,28 +86,37 @@ export default function AdminDoctorManagementPage() {
   const { toast, showToast } = useToast();
 
   const activeDoctors = useMemo(() => doctors.filter((doctor) => doctor.status !== 'INACTIVE').length, [doctors]);
+  const pageTitle = canManageDoctors ? 'Doctor Management' : 'Leave Approval';
+  const pageSubtitle = canManageDoctors
+    ? 'Create, update, and deactivate doctor accounts.'
+    : 'Review medical staff leave requests allowed by your role and department.';
 
   useEffect(() => {
     let isMounted = true;
 
-    getAdminDoctors()
-      .then((items) => {
-        if (isMounted) {
-          setDoctors(items);
-        }
-      })
-      .catch((error) => {
-        if (isMounted) {
-          showToast(error.message || 'Unable to load doctors.', 'error');
-        }
-      })
-      .finally(() => {
-        if (isMounted) {
-          setIsLoading(false);
-        }
-      });
+    if (canManageDoctors) {
+      getAdminDoctors()
+        .then((items) => {
+          if (isMounted) {
+            setDoctors(items);
+          }
+        })
+        .catch((error) => {
+          if (isMounted) {
+            showToast(error.message || 'Unable to load doctors.', 'error');
+          }
+        })
+        .finally(() => {
+          if (isMounted) {
+            setIsLoading(false);
+          }
+        });
+    } else {
+      setIsLoading(false);
+    }
 
-    getAdminLeaveRequests()
+    setIsLoadingLeaveRequests(true);
+    getAdminLeaveRequests(leaveFilters)
       .then((items) => {
         if (isMounted) {
           setLeaveRequests(items);
@@ -102,12 +126,48 @@ export default function AdminDoctorManagementPage() {
         if (isMounted) {
           showToast(error.message || 'Unable to load leave requests.', 'error');
         }
+      })
+      .finally(() => {
+        if (isMounted) {
+          setIsLoadingLeaveRequests(false);
+        }
       });
 
     return () => {
       isMounted = false;
     };
   }, []);
+
+  function updateLeaveFilter(field, value) {
+    setLeaveFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  async function loadLeaveRequests(filters = leaveFilters) {
+    setIsLoadingLeaveRequests(true);
+
+    try {
+      const items = await getAdminLeaveRequests(filters);
+      setLeaveRequests(items);
+    } catch (error) {
+      showToast(error.message || 'Unable to load leave requests.', 'error');
+    } finally {
+      setIsLoadingLeaveRequests(false);
+    }
+  }
+
+  function handleLeaveSearch(event) {
+    event.preventDefault();
+    loadLeaveRequests(leaveFilters);
+  }
+
+  function clearLeaveFilters() {
+    const nextFilters = {
+      ...emptyLeaveFilters,
+      status: canManageDoctors ? '' : 'PENDING',
+    };
+    setLeaveFilters(nextFilters);
+    loadLeaveRequests(nextFilters);
+  }
 
   function updateField(field, value) {
     setForm((current) => ({ ...current, [field]: value }));
@@ -227,9 +287,12 @@ export default function AdminDoctorManagementPage() {
     setLeaveUpdatingId(leaveRequest.id);
 
     try {
+      const rejectionReason = action === 'reject'
+        ? window.prompt('Rejection reason', leaveRequest.rejectionReason || '') || ''
+        : '';
       const updatedRequest = action === 'approve'
         ? await approveAdminLeaveRequest(leaveRequest.id)
-        : await rejectAdminLeaveRequest(leaveRequest.id);
+        : await rejectAdminLeaveRequest(leaveRequest.id, rejectionReason);
 
       setLeaveRequests((currentItems) => currentItems.map((item) => (
         Number(item.id) === Number(updatedRequest.id) ? updatedRequest : item
@@ -243,7 +306,8 @@ export default function AdminDoctorManagementPage() {
   }
 
   return (
-    <DashboardLayout role="admin" title="Doctor Management" subtitle="Create, update, and deactivate doctor accounts.">
+    <DashboardLayout role="admin" title={pageTitle} subtitle={pageSubtitle}>
+      {canManageDoctors ? (
       <div className="grid gap-5 xl:grid-cols-[420px_1fr] xl:gap-6">
         <Card>
           <CardHeader
@@ -523,13 +587,76 @@ export default function AdminDoctorManagementPage() {
           </CardBody>
         </Card>
       </div>
+      ) : null}
 
-      <Card className="mt-6">
+      <Card className={canManageDoctors ? 'mt-6' : ''}>
         <CardHeader title="Leave approvals" eyebrow="Doctor schedule workflow">
-          Approved leave dates block appointment slots. Pending and rejected requests do not affect booking.
+          Department heads review their own department. Hospital directors can review all departments below them.
         </CardHeader>
         <CardBody>
-          {leaveRequests.length === 0 ? (
+          <form className="mb-5 grid gap-4 rounded-lg border border-slate-100 bg-slate-50/60 p-4 md:grid-cols-2 xl:grid-cols-5" onSubmit={handleLeaveSearch}>
+            <label>
+              <span className="text-sm font-semibold text-slate-700">Department</span>
+              <select
+                className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                onChange={(event) => updateLeaveFilter('department', event.target.value)}
+                value={leaveFilters.department}
+              >
+                <option value="">All departments</option>
+                {SPECIALTIES.map((specialty) => (
+                  <option key={specialty.value} value={specialty.value}>
+                    Department of {specialty.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span className="text-sm font-semibold text-slate-700">Doctor name</span>
+              <input
+                className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                onChange={(event) => updateLeaveFilter('doctorName', event.target.value)}
+                placeholder="Search by name"
+                value={leaveFilters.doctorName}
+              />
+            </label>
+            <label>
+              <span className="text-sm font-semibold text-slate-700">Status</span>
+              <select
+                className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                onChange={(event) => updateLeaveFilter('status', event.target.value)}
+                value={leaveFilters.status}
+              >
+                <option value="">All statuses</option>
+                <option value="PENDING">Pending</option>
+                <option value="APPROVED">Approved</option>
+                <option value="REJECTED">Rejected</option>
+              </select>
+            </label>
+            <label>
+              <span className="text-sm font-semibold text-slate-700">Leave date</span>
+              <input
+                className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                onChange={(event) => updateLeaveFilter('date', event.target.value)}
+                type="date"
+                value={leaveFilters.date}
+              />
+            </label>
+            <div className="flex items-end gap-2">
+              <Button className="h-11" type="submit" disabled={isLoadingLeaveRequests}>
+                <Filter className="h-4 w-4" aria-hidden="true" />
+                {isLoadingLeaveRequests ? 'Loading...' : 'Filter'}
+              </Button>
+              <Button className="h-11" type="button" variant="secondary" onClick={clearLeaveFilters}>
+                Clear
+              </Button>
+            </div>
+          </form>
+
+          {isLoadingLeaveRequests ? (
+            <div className="rounded-lg border border-slate-100 bg-slate-50 px-4 py-8 text-center text-sm font-semibold text-slate-500">
+              Loading leave requests...
+            </div>
+          ) : leaveRequests.length === 0 ? (
             <EmptyState title="No leave requests pending review" description="Doctor leave requests will appear here for approval or rejection." />
           ) : (
             <DataTable
@@ -540,6 +667,9 @@ export default function AdminDoctorManagementPage() {
                   render: (row) => (
                     <div className="max-w-xs">
                       <p className="font-bold text-slate-950">{row.doctorName}</p>
+                      <p className="mt-1 whitespace-normal text-xs leading-5 text-slate-500">
+                        {row.departmentName || 'Department not set'} - {row.doctorRole || 'doctor'}
+                      </p>
                       <p className="mt-1 whitespace-normal text-xs leading-5 text-slate-500">{row.note || 'No additional note'}</p>
                     </div>
                   ),

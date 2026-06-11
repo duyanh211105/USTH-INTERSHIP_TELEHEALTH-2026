@@ -3,7 +3,7 @@ import { ApiError } from '../middleware/errors.js';
 import { createAuditLog } from './auditService.js';
 import { assertSlotAvailable, expireStalePendingAppointments } from './scheduleService.js';
 
-const validStatuses = new Set(['PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED']);
+const validStatuses = new Set(['PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED']);
 const videoRoomProvider = 'jitsi';
 const videoRoomDurationMinutes = 60;
 
@@ -332,6 +332,16 @@ export async function updateAppointmentStatus(user, id, status, options = {}) {
       .run(cancellationReason, user.id, id);
 
     return getAppointmentById(id);
+  }
+
+  if (status === 'COMPLETED') {
+    const consultationNote = await getDatabase()
+      .prepare('SELECT id FROM consultation_notes WHERE appointment_id = ?')
+      .get(id);
+
+    if (!consultationNote) {
+      throw new ApiError(400, 'Consultation note is required before completing appointment');
+    }
   }
 
   await getDatabase()

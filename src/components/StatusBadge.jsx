@@ -3,6 +3,7 @@ const styles = {
   CONFIRMED: 'bg-medical-50 text-medical-700 ring-medical-200',
   COMPLETED: 'bg-mint-50 text-mint-600 ring-mint-100',
   CANCELLED: 'bg-rose-50 text-rose-700 ring-rose-200',
+  RESCHEDULE_REQUIRED: 'bg-violet-50 text-violet-700 ring-violet-200',
   ACTIVE: 'bg-mint-50 text-mint-600 ring-mint-100',
   INACTIVE: 'bg-slate-50 text-slate-600 ring-slate-200',
   DELETED: 'bg-rose-50 text-rose-700 ring-rose-200',

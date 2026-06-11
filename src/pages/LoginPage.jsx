@@ -13,6 +13,8 @@ const demoRoles = [
 const routeByRole = {
   patient: '/patient',
   doctor: '/doctor',
+  department_head: '/admin/doctors',
+  hospital_director: '/admin/doctors',
   admin: '/admin',
 };
 
