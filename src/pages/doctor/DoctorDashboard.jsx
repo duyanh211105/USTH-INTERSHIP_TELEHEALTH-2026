@@ -12,6 +12,7 @@ import DashboardLayout from '../../layouts/DashboardLayout.jsx';
 import useToast from '../../hooks/useToast.js';
 import { cancelAppointment, getAppointments, updateAppointmentStatus } from '../../services/telehealthApi.js';
 import { mapAppointmentForView } from '../../services/viewMappers.js';
+import { getCurrentLocalDate } from '../../utils/appointmentDateTime.js';
 
 export default function DoctorDashboard() {
   const location = useLocation();
@@ -23,7 +24,7 @@ export default function DoctorDashboard() {
   const [cancellingAppointment, setCancellingAppointment] = useState(null);
   const [cancellationReason, setCancellationReason] = useState('');
   const { toast, showToast } = useToast();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getCurrentLocalDate();
   const activeWorkflowAppointments = doctorAppointments.filter((appointment) => appointment.status !== 'RESCHEDULE_REQUIRED');
   const todayAppointments = activeWorkflowAppointments.filter((appointment) => appointment.scheduledDate === today);
   const pendingAppointments = activeWorkflowAppointments.filter((appointment) => appointment.status === 'PENDING');

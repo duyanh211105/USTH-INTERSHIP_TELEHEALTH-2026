@@ -5,6 +5,7 @@ import {
   getQualificationLabel,
   normalizeQualificationCode,
 } from '../constants/doctorQualifications.js';
+import { convertUtcToDisplayDateTime, parseLocalAppointmentDateTime } from '../utils/appointmentDateTime.js';
 
 function formatDate(value) {
   if (!value) {
@@ -31,16 +32,7 @@ function formatTime(value) {
     return 'Not scheduled';
   }
 
-  const date = new Date(`1970-01-01T${value}`);
-
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(date);
+  return String(value).slice(0, 5);
 }
 
 function parseAppointmentDateTime(dateValue, timeValue) {
@@ -48,26 +40,20 @@ function parseAppointmentDateTime(dateValue, timeValue) {
     return null;
   }
 
-  const value = new Date(`${String(dateValue).slice(0, 10)}T${String(timeValue).slice(0, 5)}:00Z`);
-  return Number.isNaN(value.getTime()) ? null : value;
+  return parseLocalAppointmentDateTime(String(dateValue).slice(0, 10), String(timeValue).slice(0, 5));
 }
 
-function formatLocalAppointmentDate(dateValue, timeValue) {
-  const value = parseAppointmentDateTime(dateValue, timeValue);
-  return value ? formatDate(value.toISOString()) : formatDate(dateValue);
-}
+function getAppointmentDisplayDateTime(appointment, dateValue, timeValue) {
+  if (appointment.appointmentDateTime) {
+    const display = convertUtcToDisplayDateTime(appointment.appointmentDateTime);
 
-function formatLocalAppointmentTime(dateValue, timeValue) {
-  const value = parseAppointmentDateTime(dateValue, timeValue);
-
-  if (!value) {
-    return formatTime(timeValue);
+    if (display) {
+      return display;
+    }
   }
 
-  return new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(value);
+  const value = parseAppointmentDateTime(dateValue, timeValue);
+  return value ? convertUtcToDisplayDateTime(value) : null;
 }
 
 export function mapDoctorForView(doctor) {
@@ -101,17 +87,19 @@ export function mapDoctorForView(doctor) {
 export function mapAppointmentForView(appointment) {
   const scheduledDate = appointment.scheduledDate || appointment.appointmentDate;
   const scheduledTime = appointment.scheduledTime || appointment.appointmentTime;
+  const displayDateTime = getAppointmentDisplayDateTime(appointment, scheduledDate, scheduledTime);
 
   return {
     ...appointment,
     id: appointment.id || appointment.appointmentId,
-    scheduledDate,
-    scheduledTime,
+    appointmentDateTime: appointment.appointmentDateTime,
+    scheduledDate: displayDateTime?.localDate || scheduledDate,
+    scheduledTime: displayDateTime?.localTime || scheduledTime,
     patient: appointment.patient || appointment.patientName || 'Patient',
     doctor: appointment.doctor || appointment.doctorName || 'Doctor',
     specialty: appointment.specialty || 'Telehealth',
-    date: appointment.date || formatLocalAppointmentDate(scheduledDate, scheduledTime),
-    time: appointment.time || formatLocalAppointmentTime(scheduledDate, scheduledTime),
+    date: appointment.date || appointment.displayDate || displayDateTime?.date || formatDate(scheduledDate),
+    time: appointment.time || appointment.displayTime || displayDateTime?.time || formatTime(scheduledTime),
     priority: appointment.priority || 'NORMAL',
     status: appointment.status || 'PENDING',
   };

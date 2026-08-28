@@ -7,6 +7,7 @@ import StatusBadge from '../../components/StatusBadge.jsx';
 import DashboardLayout from '../../layouts/DashboardLayout.jsx';
 import { getStoredUser } from '../../services/apiClient.js';
 import { createSymptomSummary, getAppointments, getDoctors, getDoctorSlots } from '../../services/telehealthApi.js';
+import { addDaysToLocalDate, getCurrentLocalDate } from '../../utils/appointmentDateTime.js';
 
 const safetyDisclaimer =
   'This chatbot does not provide diagnosis or prescription. It only collects information and helps navigate the system.';
@@ -195,13 +196,13 @@ function buildSymptomSummary(answers, questions) {
 }
 
 function nextDateFromMessage(message) {
-  const today = new Date();
+  const today = getCurrentLocalDate();
 
   if (message.toLowerCase().includes('tomorrow')) {
-    today.setDate(today.getDate() + 1);
+    return addDaysToLocalDate(today, 1);
   }
 
-  return today.toISOString().slice(0, 10);
+  return today;
 }
 
 export default function ChatbotPage() {

@@ -10,16 +10,23 @@
     "db:init": "node src/db/init.js",
     "db:init:postgres": "node src/db/initPostgres.js",
     "seed": "node src/db/seed.js",
-    "test": "node src/__tests__/api.test.js"
+    "test": "node --test src/__tests__/api.test.js src/__tests__/documentTextExtractor.test.js src/__tests__/medicalAnalysisSchema.test.js src/__tests__/deidentifyMedicalText.test.js src/__tests__/aiMedicalAnalysisService.test.js src/__tests__/medicalRecordAnalysisApi.test.js src/__tests__/phase2eVerification.test.js",
+    "test:openrouter:live": "node scripts/testOpenRouter.js"
   },
   "dependencies": {
+    "@tesseract.js-data/eng": "^1.0.0",
     "bcrypt": "^6.0.0",
     "cors": "^2.8.5",
     "dotenv": "^17.0.0",
     "express": "^5.0.0",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.0.0",
-    "pg": "^8.16.3"
+    "pdf-parse": "^2.4.5",
+    "pdfjs-dist": "^6.2.108",
+    "pg": "^8.16.3",
+    "sharp": "^0.35.3",
+    "tesseract.js": "^7.0.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "supertest": "^7.0.0"

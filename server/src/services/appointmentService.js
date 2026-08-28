@@ -2,6 +2,11 @@ import { getDatabase } from '../db/connection.js';
 import { ApiError } from '../middleware/errors.js';
 import { createAuditLog } from './auditService.js';
 import { assertSlotAvailable, expireStalePendingAppointments } from './scheduleService.js';
+import {
+  appointmentTimeZone,
+  convertUtcToDisplayDateTime,
+  normalizeLocalAppointmentDateTime,
+} from '../utils/appointmentDateTime.js';
 
 const validStatuses = new Set(['PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED']);
 const videoRoomProvider = 'jitsi';
@@ -34,8 +39,34 @@ function toIsoString(value) {
   return value instanceof Date ? value.toISOString() : value;
 }
 
+function normalizeAppointmentDateTime(row) {
+  if (row.appointment_datetime) {
+    const display = convertUtcToDisplayDateTime(row.appointment_datetime, appointmentTimeZone);
+
+    return {
+      appointmentDateTime: toIsoString(row.appointment_datetime),
+      scheduledDate: display.localDate,
+      scheduledTime: display.localTime,
+      displayDate: display.date,
+      displayTime: display.time,
+    };
+  }
+
+  const normalized = normalizeLocalAppointmentDateTime(row.scheduled_date, row.scheduled_time);
+  const display = convertUtcToDisplayDateTime(normalized.utcDateTime, appointmentTimeZone);
+
+  return {
+    appointmentDateTime: normalized.utcDateTime,
+    scheduledDate: normalized.localDate,
+    scheduledTime: normalized.localTime,
+    displayDate: display.date,
+    displayTime: display.time,
+  };
+}
+
 function mapAppointment(row) {
   if (!row) return null;
+  const appointmentDateTime = normalizeAppointmentDateTime(row);
 
   return {
     id: Number(row.id),
@@ -44,8 +75,11 @@ function mapAppointment(row) {
     doctorId: Number(row.doctor_id),
     doctorName: row.doctor_name,
     specialty: row.specialty || 'Telehealth',
-    scheduledDate: toDateString(row.scheduled_date),
-    scheduledTime: toTimeString(row.scheduled_time),
+    appointmentDateTime: appointmentDateTime.appointmentDateTime,
+    scheduledDate: appointmentDateTime.scheduledDate,
+    scheduledTime: appointmentDateTime.scheduledTime,
+    displayDate: appointmentDateTime.displayDate,
+    displayTime: appointmentDateTime.displayTime,
     reason: row.reason,
     status: row.status,
     cancellationReason: row.cancellation_reason,
@@ -62,15 +96,21 @@ function buildVideoRoomUrl(appointmentId) {
 }
 
 function parseAppointmentStart(appointment) {
+  if (appointment?.appointmentDateTime) {
+    const value = new Date(appointment.appointmentDateTime);
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
   if (!appointment?.scheduledDate || !appointment?.scheduledTime) {
     return null;
   }
 
-  const date = toDateString(appointment.scheduledDate);
-  const time = toTimeString(appointment.scheduledTime);
-  const value = new Date(`${date}T${time}:00Z`);
-
-  return Number.isNaN(value.getTime()) ? null : value;
+  try {
+    const normalized = normalizeLocalAppointmentDateTime(appointment.scheduledDate, appointment.scheduledTime);
+    return new Date(normalized.utcDateTime);
+  } catch {
+    return null;
+  }
 }
 
 export function getAppointmentVideoAccessWindow(appointment) {
@@ -175,7 +215,7 @@ export async function listAppointmentsForUser(user) {
     params.push(user.id);
   }
 
-  query += ' ORDER BY a.scheduled_date ASC, a.scheduled_time ASC, a.id ASC';
+  query += ' ORDER BY a.appointment_datetime ASC, a.id ASC';
   const rows = await getDatabase().prepare(query).all(...params);
   return rows.map(mapAppointment);
 }
@@ -188,6 +228,9 @@ function mapUpcomingAppointment(appointment) {
     specialty: appointment.specialty,
     appointmentDate: appointment.scheduledDate,
     appointmentTime: appointment.scheduledTime,
+    appointmentDateTime: appointment.appointmentDateTime,
+    displayDate: appointment.displayDate,
+    displayTime: appointment.displayTime,
     scheduledDate: appointment.scheduledDate,
     scheduledTime: appointment.scheduledTime,
     status: appointment.status,
@@ -212,7 +255,7 @@ export async function listUpcomingAppointmentsForUser(user, options = {}) {
     params.push(user.id);
   }
 
-  query += ' ORDER BY a.scheduled_date ASC, a.scheduled_time ASC, a.id ASC';
+  query += ' ORDER BY a.appointment_datetime ASC, a.id ASC';
 
   const rows = await getDatabase().prepare(query).all(...params);
   return rows
@@ -233,11 +276,18 @@ export async function createAppointment(user, data) {
 
   await expireStalePendingAppointments();
 
-  const { doctorId, scheduledDate, scheduledTime, reason } = data;
+  const { doctorId, reason } = data;
+  const inputDate = data.scheduledDate || data.appointmentDate;
+  const inputTime = data.scheduledTime || data.appointmentTime;
 
-  if (!doctorId || !scheduledDate || !scheduledTime || !reason) {
+  if (!doctorId || !inputDate || !inputTime || !reason) {
     throw new ApiError(400, 'doctorId, scheduledDate, scheduledTime, and reason are required');
   }
+
+  const normalizedDateTime = normalizeLocalAppointmentDateTime(inputDate, inputTime, appointmentTimeZone);
+  const scheduledDate = normalizedDateTime.localDate;
+  const scheduledTime = normalizedDateTime.localTime;
+  const appointmentDateTime = normalizedDateTime.utcDateTime;
 
   const doctor = await getDatabase().prepare("SELECT id FROM users WHERE id = ? AND role = 'doctor' AND status = 'ACTIVE'").get(doctorId);
   if (!doctor) {
@@ -249,14 +299,13 @@ export async function createAppointment(user, data) {
       ${appointmentSelect}
       WHERE a.patient_id = ?
         AND a.doctor_id = ?
-        AND a.scheduled_date = ?
-        AND a.scheduled_time = ?
+        AND a.appointment_datetime = ?
         AND a.status <> 'CANCELLED'
         AND a.created_at >= datetime('now', '-5 seconds')
       ORDER BY a.id ASC
       LIMIT 1
     `)
-    .get(user.id, doctorId, scheduledDate, scheduledTime);
+    .get(user.id, doctorId, appointmentDateTime);
 
   if (duplicate) {
     return {
@@ -269,12 +318,11 @@ export async function createAppointment(user, data) {
     .prepare(`
       SELECT id FROM appointments
       WHERE doctor_id = ?
-        AND scheduled_date = ?
-        AND scheduled_time = ?
+        AND appointment_datetime = ?
         AND status <> 'CANCELLED'
       LIMIT 1
     `)
-    .get(doctorId, scheduledDate, scheduledTime);
+    .get(doctorId, appointmentDateTime);
 
   if (lockedSlot) {
     throw new ApiError(409, 'Selected appointment slot is unavailable');
@@ -284,10 +332,10 @@ export async function createAppointment(user, data) {
 
   const result = await getDatabase()
     .prepare(`
-      INSERT INTO appointments (patient_id, doctor_id, scheduled_date, scheduled_time, reason, status)
-      VALUES (?, ?, ?, ?, ?, 'PENDING')
+      INSERT INTO appointments (patient_id, doctor_id, scheduled_date, scheduled_time, appointment_datetime, reason, status)
+      VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
     `)
-    .run(user.id, doctorId, scheduledDate, scheduledTime, reason);
+    .run(user.id, doctorId, scheduledDate, scheduledTime, appointmentDateTime, reason);
 
   return {
     appointment: await getAppointmentById(Number(result.lastInsertRowid)),

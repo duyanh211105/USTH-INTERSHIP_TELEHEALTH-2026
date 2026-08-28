@@ -3,6 +3,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { getDatabase, closeDatabase } from './connection.js';
 import { initializeDatabase } from './schema.js';
+import { normalizeLocalAppointmentDateTime } from '../utils/appointmentDateTime.js';
 
 dotenv.config();
 
@@ -132,10 +133,11 @@ export async function seedDatabase() {
 
   const existingAppointments = Number((await db.prepare('SELECT COUNT(*) AS count FROM appointments').get()).count);
   if (existingAppointments === 0) {
+    const appointmentDateTime = normalizeLocalAppointmentDateTime('2026-05-10', '10:30').utcDateTime;
     await db.prepare(`
-      INSERT INTO appointments (patient_id, doctor_id, scheduled_date, scheduled_time, reason, status)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(ids.patient, ids.doctor, '2026-05-10', '10:30', 'Headache and mild fever for 2 days', 'CONFIRMED');
+      INSERT INTO appointments (patient_id, doctor_id, scheduled_date, scheduled_time, appointment_datetime, reason, status)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(ids.patient, ids.doctor, '2026-05-10', '10:30', appointmentDateTime, 'Headache and mild fever for 2 days', 'CONFIRMED');
   }
 
   const existingRecords = Number((await db.prepare('SELECT COUNT(*) AS count FROM medical_records').get()).count);

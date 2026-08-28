@@ -42,6 +42,9 @@ server/server/data/
 server/postgres-data/
 server/postgres.log
 
+# Local PaddleOCR Python environment
+server/.venv-paddle/
+
 # OS and editor files
 .DS_Store
 Thumbs.db

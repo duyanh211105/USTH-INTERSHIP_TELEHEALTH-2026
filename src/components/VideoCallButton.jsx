@@ -2,17 +2,21 @@ import { Loader2, Video } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { getAppointmentVideoRoom } from '../services/telehealthApi.js';
 import Button from './Button.jsx';
+import { parseLocalAppointmentDateTime } from '../utils/appointmentDateTime.js';
 
 function parseAppointmentStart(appointment) {
+  if (appointment?.appointmentDateTime) {
+    const value = new Date(appointment.appointmentDateTime);
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+
   if (!appointment?.scheduledDate || !appointment?.scheduledTime) {
     return null;
   }
 
   const date = String(appointment.scheduledDate).slice(0, 10);
   const time = String(appointment.scheduledTime).slice(0, 5);
-  const value = new Date(`${date}T${time}:00Z`);
-
-  return Number.isNaN(value.getTime()) ? null : value;
+  return parseLocalAppointmentDateTime(date, time);
 }
 
 export function getVideoCallWindowState(appointment, now = new Date()) {

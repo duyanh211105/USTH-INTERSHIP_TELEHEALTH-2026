@@ -10,6 +10,12 @@ import {
   getQualificationLabel,
   normalizeQualificationCode,
 } from './doctorQualificationService.js';
+import { addDaysToLocalDate, getCurrentLocalDate } from '../utils/appointmentDateTime.js';
+
+const supportedLanguages = new Set(['vietnamese', 'english', 'japanese', 'korean', 'chinese']);
+const supportedRatingThresholds = new Set([4, 4.5, 4.8]);
+const maxExperienceForScore = 30;
+const maxReviewCountForScore = 500;
 
 export function mapDoctor(row) {
   if (!row) return null;
@@ -44,6 +50,7 @@ export function mapDoctor(row) {
     averageRating,
     reviewCount,
     patientsCount: Number(row.patients_count),
+    recommendationScore: Number(row.recommendation_score || 0),
     videoConsultationAvailable: true,
   };
 }
@@ -114,13 +121,11 @@ function parseOptionalNumber(value) {
 }
 
 function getTodayIsoDate() {
-  return new Date().toISOString().slice(0, 10);
+  return getCurrentLocalDate();
 }
 
 function addUtcDays(date, days) {
-  const value = new Date(`${date}T00:00:00.000Z`);
-  value.setUTCDate(value.getUTCDate() + days);
-  return value.toISOString().slice(0, 10);
+  return addDaysToLocalDate(date, days);
 }
 
 function getDateWindow(startDate, dayCount) {
@@ -129,9 +134,18 @@ function getDateWindow(startDate, dayCount) {
 
 function getAvailabilityDates({ date, availableToday, availableNext3Days, availableWithin3Days, availableThisWeek }) {
   const today = getTodayIsoDate();
+  const requestedDate = normalizeOptionalString(date);
+
+  if (requestedDate) {
+    return [requestedDate];
+  }
 
   if (String(availableToday || '').toLowerCase() === 'true') {
     return getDateWindow(today, 1);
+  }
+
+  if (String(availableThisWeek || '').toLowerCase() === 'true') {
+    return getDateWindow(today, 7);
   }
 
   if (
@@ -141,12 +155,7 @@ function getAvailabilityDates({ date, availableToday, availableNext3Days, availa
     return getDateWindow(today, 3);
   }
 
-  if (String(availableThisWeek || '').toLowerCase() === 'true') {
-    return getDateWindow(today, 7);
-  }
-
-  const requestedDate = normalizeOptionalString(date);
-  return requestedDate ? [requestedDate] : getDateWindow(today, 7);
+  return getDateWindow(today, 7);
 }
 
 function formatNextAvailability(slot) {
@@ -176,21 +185,36 @@ function getSortSql(sort) {
       return 'ORDER BY p.consultation_fee DESC, u.name ASC';
     case 'highest_rating':
       return 'ORDER BY p.average_rating DESC, p.review_count DESC, u.name ASC';
+    case 'most_experienced':
+      return 'ORDER BY p.years_of_experience DESC, u.name ASC';
+    case 'most_reviewed':
+      return 'ORDER BY p.review_count DESC, p.average_rating DESC, u.name ASC';
     default:
       return 'ORDER BY u.name ASC';
   }
 }
 
 function applyInMemorySort(doctors, sort) {
-  if (sort !== 'earliest_availability') {
-    return doctors;
+  const normalizedSort = normalizeOptionalString(sort) || 'recommended';
+
+  if (normalizedSort === 'earliest_availability') {
+    return [...doctors].sort((left, right) => {
+      const leftSlot = left.nextAvailableAt || '9999-99-99T99:99:99.999Z';
+      const rightSlot = right.nextAvailableAt || '9999-99-99T99:99:99.999Z';
+      return leftSlot.localeCompare(rightSlot) || left.name.localeCompare(right.name);
+    });
   }
 
-  return [...doctors].sort((left, right) => {
-    const leftSlot = left.nextAvailableAt || '9999-99-99T99:99:99.999Z';
-    const rightSlot = right.nextAvailableAt || '9999-99-99T99:99:99.999Z';
-    return leftSlot.localeCompare(rightSlot) || left.name.localeCompare(right.name);
-  });
+  if (normalizedSort === 'recommended') {
+    return [...doctors].sort((left, right) => (
+      right.recommendationScore - left.recommendationScore
+      || Number(right.averageRating || 0) - Number(left.averageRating || 0)
+      || Number(right.reviewCount || 0) - Number(left.reviewCount || 0)
+      || left.name.localeCompare(right.name)
+    ));
+  }
+
+  return doctors;
 }
 
 async function getNextAvailability(doctorId, dates) {
@@ -215,9 +239,11 @@ async function enrichWithAvailability(doctors, dates, requireAvailability) {
   const enrichedDoctors = await Promise.all(
     doctors.map(async (doctor) => {
       const nextAvailability = await getNextAvailability(doctor.id, dates);
+      const recommendationScore = calculateRecommendationScore(doctor, nextAvailability);
 
       return {
         ...doctor,
+        recommendationScore,
         nextAvailableSlot: nextAvailability?.time || null,
         nextAvailableAt: nextAvailability?.startsAt || null,
         availability: formatNextAvailability(nextAvailability),
@@ -227,6 +253,81 @@ async function enrichWithAvailability(doctors, dates, requireAvailability) {
   );
 
   return requireAvailability ? enrichedDoctors.filter((doctor) => doctor.nextAvailableSlot) : enrichedDoctors;
+}
+
+function clampScore(value) {
+  return Math.max(0, Math.min(value, 1));
+}
+
+function getAvailabilityScore(nextAvailability) {
+  if (!nextAvailability?.startsAt) {
+    return 0;
+  }
+
+  const startsAt = new Date(nextAvailability.startsAt);
+  const diffDays = (startsAt.getTime() - Date.now()) / (24 * 60 * 60 * 1000);
+
+  if (diffDays <= 1) {
+    return 1;
+  }
+
+  if (diffDays <= 3) {
+    return 0.75;
+  }
+
+  if (diffDays <= 7) {
+    return 0.5;
+  }
+
+  return 0.25;
+}
+
+function calculateRecommendationScore(doctor, nextAvailability) {
+  const normalizedRating = clampScore(Number(doctor.averageRating || doctor.rating || 0) / 5);
+  const availabilityScore = getAvailabilityScore(nextAvailability);
+  const normalizedExperience = clampScore(Number(doctor.yearsOfExperience || 0) / maxExperienceForScore);
+  const normalizedReviewCount = clampScore(Number(doctor.reviewCount || 0) / maxReviewCountForScore);
+
+  return Number((
+    0.4 * normalizedRating
+    + 0.3 * availabilityScore
+    + 0.2 * normalizedExperience
+    + 0.1 * normalizedReviewCount
+  ).toFixed(4));
+}
+
+function parseSupportedRating(value) {
+  const rating = parseOptionalNumber(value);
+  return supportedRatingThresholds.has(rating) ? rating : null;
+}
+
+function parseSupportedLanguage(value) {
+  const language = normalizeOptionalString(value);
+  return supportedLanguages.has(language.toLowerCase()) ? language : '';
+}
+
+function normalizeSortOption(value) {
+  const sort = normalizeOptionalString(value);
+  const supportedSorts = new Set([
+    '',
+    'recommended',
+    'highest_rating',
+    'most_experienced',
+    'earliest_availability',
+    'lowest_fee',
+    'highest_fee',
+    'most_reviewed',
+  ]);
+
+  return supportedSorts.has(sort) ? sort : 'recommended';
+}
+
+function paginateDoctors(doctors, page, limit) {
+  const pageNumber = Math.max(Number(page) || 1, 1);
+  const limitNumber = Math.min(Math.max(Number(limit) || doctors.length || 20, 1), 50);
+  const start = (pageNumber - 1) * limitNumber;
+
+  return doctors.slice(start, start + limitNumber);
 }
 
 export async function listDoctors({
@@ -242,12 +343,15 @@ export async function listDoctors({
   availableWithin3Days,
   availableThisWeek,
   videoAvailable,
+  consultationType,
   minExperience,
   minYearsExperience,
   minRating,
   gender,
   language,
   sort,
+  page,
+  limit,
 } = {}) {
   const statusFilter = includeInactive ? '' : "AND u.status = 'ACTIVE'";
   const params = [];
@@ -258,11 +362,12 @@ export async function listDoctors({
   const minFeeFilter = parseOptionalFee(minFee);
   const maxFeeFilter = parseOptionalFee(maxFee);
   const minExperienceFilter = parseOptionalNumber(minExperience ?? minYearsExperience);
-  const minRatingFilter = parseOptionalNumber(minRating);
+  const minRatingFilter = parseSupportedRating(minRating);
   const genderFilter = normalizeOptionalString(gender);
-  const languageFilter = normalizeOptionalString(language);
-  const requestedSort = normalizeOptionalString(sort);
-  const hasVideoFilter = String(videoAvailable || '').toLowerCase() === 'true';
+  const languageFilter = parseSupportedLanguage(language);
+  const requestedSort = normalizeSortOption(sort);
+  const requestedConsultationType = normalizeOptionalString(consultationType).toLowerCase();
+  const hasVideoFilter = String(videoAvailable || '').toLowerCase() === 'true' || requestedConsultationType === 'video';
   const availabilityDates = getAvailabilityDates({ date, availableToday, availableNext3Days, availableWithin3Days, availableThisWeek });
   const requireAvailability = Boolean(
     normalizeOptionalString(date)
@@ -336,5 +441,5 @@ export async function listDoctors({
   const doctors = rows.map(mapDoctor);
   const doctorsWithAvailability = await enrichWithAvailability(doctors, availabilityDates, requireAvailability);
 
-  return applyInMemorySort(doctorsWithAvailability, requestedSort);
+  return paginateDoctors(applyInMemorySort(doctorsWithAvailability, requestedSort), page, limit);
 }

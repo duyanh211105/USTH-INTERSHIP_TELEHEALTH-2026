@@ -4,7 +4,10 @@ import { Link, useNavigate, useParams } from 'react-router-dom';
 import Button from '../../components/Button.jsx';
 import Card, { CardBody, CardHeader } from '../../components/Card.jsx';
 import DataTable from '../../components/DataTable.jsx';
+import MedicalRecordAiAnalysis from '../../components/MedicalRecordAiAnalysis.jsx';
 import StatusBadge from '../../components/StatusBadge.jsx';
+import Toast from '../../components/Toast.jsx';
+import useToast from '../../hooks/useToast.js';
 import DashboardLayout from '../../layouts/DashboardLayout.jsx';
 import {
   getAppointments,
@@ -59,6 +62,7 @@ function getRouteAccessMessage(error) {
 export default function PatientDetailPage() {
   const { patientId } = useParams();
   const navigate = useNavigate();
+  const { toast, showToast } = useToast();
   const [profile, setProfile] = useState(null);
   const [records, setRecords] = useState([]);
   const [appointments, setAppointments] = useState([]);
@@ -152,6 +156,8 @@ export default function PatientDetailPage() {
 
   return (
     <DashboardLayout role="doctor" title="Patient Detail" subtitle="Review submitted symptoms, records, and prior consultation history.">
+      <Toast toast={toast} />
+
       {isLoading ? (
         <Card>
           <CardBody>
@@ -314,6 +320,8 @@ export default function PatientDetailPage() {
                       ) : (
                         <p className="mt-3 text-xs font-semibold text-slate-500">No files uploaded for this record.</p>
                       )}
+
+                      <MedicalRecordAiAnalysis record={record} showToast={showToast} />
                     </div>
                   ))}
                 </CardBody>

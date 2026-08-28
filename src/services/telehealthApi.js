@@ -160,6 +160,23 @@ export function deleteMedicalRecord(recordId) {
   });
 }
 
+export function getMedicalRecordAiAnalysis(recordId) {
+  return apiRequest(`/api/medical-records/${recordId}/ai-analysis`).then((data) => data.analysis);
+}
+
+export function requestMedicalRecordAiAnalysis(recordId) {
+  return apiRequest(`/api/medical-records/${recordId}/ai-analysis`, {
+    method: 'POST',
+  }).then((data) => data.analysis);
+}
+
+export function reviewMedicalRecordAiAnalysis(recordId, payload) {
+  return apiRequest(`/api/medical-records/${recordId}/ai-analysis/review`, {
+    method: 'PATCH',
+    body: payload,
+  }).then((data) => data.analysis);
+}
+
 export function createSymptomSummary(payload) {
   return apiRequest('/symptoms', {
     method: 'POST',

@@ -8,8 +8,13 @@ function escapeIcsText(value) {
     .replace(/\r?\n/g, '\\n');
 }
 
-function toIcsDate(date, time, offsetMinutes = 0) {
-  const start = new Date(`${date}T${time}:00.000Z`);
+function toIcsDate(appointment, offsetMinutes = 0) {
+  const start = new Date(appointment.appointmentDateTime);
+
+  if (Number.isNaN(start.getTime())) {
+    throw new Error('Appointment UTC datetime is invalid');
+  }
+
   start.setUTCMinutes(start.getUTCMinutes() + offsetMinutes);
   return start.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
@@ -34,9 +39,9 @@ export async function generateAppointmentCalendar(user, appointmentId) {
       'METHOD:PUBLISH',
       'BEGIN:VEVENT',
       `UID:appointment-${appointment.id}@mediconnect.local`,
-      `DTSTAMP:${toIcsDate(appointment.scheduledDate, appointment.scheduledTime)}`,
-      `DTSTART:${toIcsDate(appointment.scheduledDate, appointment.scheduledTime)}`,
-      `DTEND:${toIcsDate(appointment.scheduledDate, appointment.scheduledTime, 30)}`,
+      `DTSTAMP:${toIcsDate(appointment)}`,
+      `DTSTART:${toIcsDate(appointment)}`,
+      `DTEND:${toIcsDate(appointment, 30)}`,
       `SUMMARY:${escapeIcsText(title)}`,
       `DESCRIPTION:${escapeIcsText(description)}`,
       `STATUS:${appointment.status === 'CANCELLED' ? 'CANCELLED' : 'CONFIRMED'}`,

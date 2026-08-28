@@ -17,6 +17,7 @@ const { closeDatabase, getDatabase } = await import('../db/connection.js');
 const { initializeDatabase, postgresSchemaSql } = await import('../db/schema.js');
 const { seedDatabase } = await import('../db/seed.js');
 const { getSpecialtyLabel, normalizeSpecialtyCode } = await import('../services/specialtyService.js');
+const { convertUtcToDisplayDateTime, normalizeLocalAppointmentDateTime } = await import('../utils/appointmentDateTime.js');
 
 async function login(phone, password = 'password123') {
   const response = await request(app)
@@ -50,15 +51,11 @@ describe('telehealth backend API', () => {
 
   function dateTimeOffsetMinutes(offsetMinutes) {
     const value = new Date(Date.now() + offsetMinutes * 60 * 1000);
-    const year = value.getUTCFullYear();
-    const month = String(value.getUTCMonth() + 1).padStart(2, '0');
-    const day = String(value.getUTCDate()).padStart(2, '0');
-    const hours = String(value.getUTCHours()).padStart(2, '0');
-    const minutes = String(value.getUTCMinutes()).padStart(2, '0');
+    const display = convertUtcToDisplayDateTime(value);
 
     return {
-      date: `${year}-${month}-${day}`,
-      time: `${hours}:${minutes}`,
+      date: display.localDate,
+      time: display.localTime,
     };
   }
 
@@ -80,6 +77,7 @@ describe('telehealth backend API', () => {
     videoRoomProvider = null,
   } = {}) {
     const { date, time } = dateTimeOffsetMinutes(offsetMinutes);
+    const appointmentDateTime = normalizeLocalAppointmentDateTime(date, time).utcDateTime;
     const result = getDatabase()
       .prepare(
         `INSERT INTO appointments (
@@ -87,13 +85,14 @@ describe('telehealth backend API', () => {
           doctor_id,
           scheduled_date,
           scheduled_time,
+          appointment_datetime,
           reason,
           status,
           video_room_url,
           video_room_provider
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(patient, doctor, date, time, reason, status, videoRoomUrl, videoRoomProvider);
+      .run(patient, doctor, date, time, appointmentDateTime, reason, status, videoRoomUrl, videoRoomProvider);
 
     return Number(result.lastInsertRowid);
   }
@@ -441,6 +440,93 @@ describe('telehealth backend API', () => {
     assert.match(doctor.availabilitySummary, /Next Available|Available/);
   });
 
+  it('sorts doctors by backend recommendation score and paginates search results safely', async () => {
+    const alpha = await request(app)
+      .post('/admin/doctors')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        full_name: 'Dr. Recommended Alpha',
+        email: 'recommended-alpha@example.com',
+        password: 'doctorSecret123',
+        specialty: 'Cardiology',
+        phone: '0911111177',
+        bio: 'High recommendation score provider.',
+        consultation_fee: 70,
+      })
+      .expect(201);
+
+    const beta = await request(app)
+      .post('/admin/doctors')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        full_name: 'Dr. Recommended Beta',
+        email: 'recommended-beta@example.com',
+        password: 'doctorSecret123',
+        specialty: 'Cardiology',
+        phone: '0911111176',
+        bio: 'Lower recommendation score provider.',
+        consultation_fee: 40,
+      })
+      .expect(201);
+
+    getDatabase()
+      .prepare(`
+        UPDATE doctor_profiles
+        SET average_rating = ?, review_count = ?, years_of_experience = ?, languages_spoken = ?, gender = ?
+        WHERE user_id = ?
+      `)
+      .run(5, 400, 25, 'Vietnamese, English', 'Male', alpha.body.data.doctor.id);
+    getDatabase()
+      .prepare(`
+        UPDATE doctor_profiles
+        SET average_rating = ?, review_count = ?, years_of_experience = ?, languages_spoken = ?, gender = ?
+        WHERE user_id = ?
+      `)
+      .run(4, 5, 2, 'Vietnamese', 'Female', beta.body.data.doctor.id);
+
+    const insertSchedule = getDatabase().prepare(`
+      INSERT INTO doctor_schedules (doctor_id, weekday, start_time, end_time, slot_duration)
+      VALUES (?, ?, ?, ?, ?)
+    `);
+    for (const doctor of [alpha.body.data.doctor, beta.body.data.doctor]) {
+      for (const weekday of [0, 1, 2, 3, 4, 5, 6]) {
+        insertSchedule.run(doctor.id, weekday, '08:00', '09:00', 30);
+      }
+    }
+
+    const recommended = await request(app)
+      .get('/doctors?q=Recommended&sort=recommended&page=1&limit=1')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    assert.equal(recommended.body.data.doctors.length, 1);
+    assert.equal(recommended.body.data.doctors[0].id, alpha.body.data.doctor.id);
+    assert.equal(typeof recommended.body.data.doctors[0].recommendationScore, 'number');
+
+    const mostExperienced = await request(app)
+      .get('/doctors?q=Recommended&sort=most_experienced&limit=2')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    assert.equal(mostExperienced.body.data.doctors[0].id, alpha.body.data.doctor.id);
+
+    const mostReviewed = await request(app)
+      .get('/doctors?q=Recommended&sort=most_reviewed&limit=2')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    assert.equal(mostReviewed.body.data.doctors[0].id, alpha.body.data.doctor.id);
+
+    const strictFilters = await request(app)
+      .get('/doctors?q=Recommended&language=English&minRating=4.8')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    assert.equal(strictFilters.body.data.doctors.every((doctor) => doctor.id === alpha.body.data.doctor.id), true);
+
+    const invalidFilters = await request(app)
+      .get('/doctors?q=Recommended&language=French&minRating=3&sort=unknown-sort&page=1&limit=2')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .expect(200);
+    assert.equal(invalidFilters.body.data.doctors.length, 2);
+  });
+
   it('allows one patient doctor review after a completed appointment and updates cached rating fields', async () => {
     const appointmentId = insertVideoAppointment({ status: 'COMPLETED', offsetMinutes: -30, reason: 'Completed review appointment' });
 
@@ -675,6 +761,51 @@ describe('telehealth backend API', () => {
       .expect(200);
 
     assert.equal(listed.body.data.appointments.some((appointment) => appointment.id === appointmentId), true);
+  });
+
+  it('stores patient-selected Vietnam appointment time as UTC without shifting display fields', async () => {
+    const createdDoctor = await request(app)
+      .post('/admin/doctors')
+      .set('Authorization', `Bearer ${adminToken}`)
+      .send({
+        full_name: 'Dr. Timezone Safe',
+        email: 'timezone-safe@example.com',
+        password: 'doctorSecret123',
+        specialty: 'Cardiology',
+        phone: '0911111166',
+        bio: 'Timezone appointment test doctor.',
+        consultation_fee: 50,
+      })
+      .expect(201);
+
+    getDatabase()
+      .prepare(`
+        INSERT INTO doctor_schedules (doctor_id, weekday, start_time, end_time, slot_duration)
+        VALUES (?, ?, ?, ?, ?)
+      `)
+      .run(createdDoctor.body.data.doctor.id, 4, '09:00', '10:00', 30);
+
+    const created = await request(app)
+      .post('/appointments')
+      .set('Authorization', `Bearer ${patientToken}`)
+      .send({
+        doctorId: createdDoctor.body.data.doctor.id,
+        scheduledDate: '2026-06-11',
+        scheduledTime: '09:30',
+        reason: 'Timezone safe booking',
+      })
+      .expect(201);
+
+    assert.equal(created.body.data.appointment.appointmentDateTime, '2026-06-11T02:30:00.000Z');
+    assert.equal(created.body.data.appointment.scheduledDate, '2026-06-11');
+    assert.equal(created.body.data.appointment.scheduledTime, '09:30');
+    assert.equal(created.body.data.appointment.displayDate, '11/06/2026');
+    assert.equal(created.body.data.appointment.displayTime, '09:30');
+
+    const row = getDatabase()
+      .prepare('SELECT appointment_datetime FROM appointments WHERE id = ?')
+      .get(created.body.data.appointment.id);
+    assert.equal(row.appointment_datetime, '2026-06-11T02:30:00.000Z');
   });
 
   it('returns only the next five future pending or confirmed appointments from the upcoming endpoint', async () => {
@@ -1020,10 +1151,17 @@ describe('telehealth backend API', () => {
 
     const appointmentResult = getDatabase()
       .prepare(`
-        INSERT INTO appointments (patient_id, doctor_id, scheduled_date, scheduled_time, reason, status)
-        VALUES (?, ?, ?, ?, ?, 'CONFIRMED')
+        INSERT INTO appointments (patient_id, doctor_id, scheduled_date, scheduled_time, appointment_datetime, reason, status)
+        VALUES (?, ?, ?, ?, ?, ?, 'CONFIRMED')
       `)
-      .run(patientId, doctorId, leaveDate, '15:00', 'Leave conflict appointment');
+      .run(
+        patientId,
+        doctorId,
+        leaveDate,
+        '15:00',
+        normalizeLocalAppointmentDateTime(leaveDate, '15:00').utcDateTime,
+        'Leave conflict appointment',
+      );
     const appointmentId = Number(appointmentResult.lastInsertRowid);
 
     const leaveRequests = await request(app)

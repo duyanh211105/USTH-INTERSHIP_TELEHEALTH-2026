@@ -1,5 +1,6 @@
 import { getDatabase } from '../db/connection.js';
 import { ApiError } from '../middleware/errors.js';
+import { normalizeLocalAppointmentDateTime } from '../utils/appointmentDateTime.js';
 
 const datePattern = /^\d{4}-\d{2}-\d{2}$/;
 const timePattern = /^\d{2}:\d{2}$/;
@@ -280,11 +281,14 @@ export async function generateSlots(date, doctorId) {
       const time = toTime(cursor);
 
       if (!lockedTimes.has(time) && !emittedTimes.has(time)) {
+        const startsAt = normalizeLocalAppointmentDateTime(date, time).utcDateTime;
+        const endsAt = normalizeLocalAppointmentDateTime(date, toTime(cursor + duration)).utcDateTime;
+
         emittedTimes.add(time);
         slots.push({
           time,
-          startsAt: `${date}T${time}:00.000Z`,
-          endsAt: `${date}T${toTime(cursor + duration)}:00.000Z`,
+          startsAt,
+          endsAt,
         });
       }
     }

@@ -1,4 +1,4 @@
-import { BadgeCheck, CalendarDays, CalendarPlus, Clock, DollarSign, Filter, Search, Star, Stethoscope, Users, Video } from 'lucide-react';
+import { BadgeCheck, CalendarDays, CalendarPlus, Clock, DollarSign, Filter, Search, SlidersHorizontal, Star, Stethoscope, Users, Video } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import Button from '../../components/Button.jsx';
 import Card, { CardBody, CardHeader } from '../../components/Card.jsx';
@@ -12,6 +12,7 @@ import useToast from '../../hooks/useToast.js';
 import { getStoredUser } from '../../services/apiClient.js';
 import { createAppointment, createSymptomSummary, getDoctorSlots, getDoctors } from '../../services/telehealthApi.js';
 import { mapDoctorForView } from '../../services/viewMappers.js';
+import { getCurrentLocalDate } from '../../utils/appointmentDateTime.js';
 
 const DOCTOR_FILTER_STORAGE_KEY = 'mediconnect_doctor_filters';
 const DEFAULT_DOCTOR_FILTERS = {
@@ -29,8 +30,35 @@ const DEFAULT_DOCTOR_FILTERS = {
   language: '',
   availableToday: false,
   videoAvailable: false,
-  sort: '',
+  consultationType: '',
+  sort: 'recommended',
 };
+
+const RATING_OPTIONS = [
+  { value: '', label: 'Any rating' },
+  { value: '4', label: '4+' },
+  { value: '4.5', label: '4.5+' },
+  { value: '4.8', label: '4.8+' },
+];
+
+const LANGUAGE_OPTIONS = [
+  { value: '', label: 'Any language' },
+  { value: 'Vietnamese', label: 'Vietnamese' },
+  { value: 'English', label: 'English' },
+  { value: 'Japanese', label: 'Japanese' },
+  { value: 'Korean', label: 'Korean' },
+  { value: 'Chinese', label: 'Chinese' },
+];
+
+const SORT_OPTIONS = [
+  { value: 'recommended', label: 'Recommended' },
+  { value: 'highest_rating', label: 'Highest Rating' },
+  { value: 'most_experienced', label: 'Most Experienced' },
+  { value: 'earliest_availability', label: 'Earliest Available' },
+  { value: 'lowest_fee', label: 'Lowest Fee' },
+  { value: 'highest_fee', label: 'Highest Fee' },
+  { value: 'most_reviewed', label: 'Most Reviewed' },
+];
 
 const INTAKE_QUESTIONS = [
   { key: 'mainSymptom', label: 'Symptoms', prompt: 'What symptoms are you experiencing?' },
@@ -49,7 +77,7 @@ const EMPTY_INTAKE_ANSWERS = {
 };
 
 function getTodayUtcDate() {
-  return new Date().toISOString().slice(0, 10);
+  return getCurrentLocalDate();
 }
 
 function buildIntakeSummary(answers) {
@@ -72,6 +100,8 @@ function readStoredDoctorFilters() {
 }
 
 function buildDoctorSearchParams(filters) {
+  const hasSpecificDate = Boolean(filters.date);
+
   return {
     q: filters.q,
     specialty: filters.specialty,
@@ -79,15 +109,17 @@ function buildDoctorSearchParams(filters) {
     minFee: filters.minFee,
     maxFee: filters.maxFee,
     qualificationTitle: filters.qualificationTitle,
-    availableNext3Days: filters.availableNext3Days ? true : undefined,
-    availableThisWeek: filters.availableThisWeek ? true : undefined,
+    availableThisWeek: !hasSpecificDate && filters.availableThisWeek ? true : undefined,
     minExperience: filters.minExperience,
     minRating: filters.minRating,
     gender: filters.gender,
     language: filters.language,
-    availableToday: filters.availableToday ? true : undefined,
+    availableToday: !hasSpecificDate && filters.availableToday ? true : undefined,
     videoAvailable: filters.videoAvailable ? true : undefined,
-    sort: filters.sort,
+    consultationType: filters.consultationType,
+    sort: filters.sort || 'recommended',
+    page: 1,
+    limit: 20,
   };
 }
 
@@ -106,6 +138,7 @@ export default function BookAppointmentPage() {
   const [scheduledTime, setScheduledTime] = useState('');
   const [slots, setSlots] = useState([]);
   const [doctorFilters, setDoctorFilters] = useState(readStoredDoctorFilters);
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
   const [isLoadingDoctors, setIsLoadingDoctors] = useState(true);
   const [isLoadingSlots, setIsLoadingSlots] = useState(false);
   const [reason, setReason] = useState('Headache and mild fever for 2 days. Requesting remote consultation.');
@@ -310,7 +343,29 @@ export default function BookAppointmentPage() {
   }
 
   function handleFilterChange(field, value) {
-    setDoctorFilters((currentFilters) => ({ ...currentFilters, [field]: value }));
+    setDoctorFilters((currentFilters) => {
+      const nextFilters = { ...currentFilters, [field]: value };
+
+      if (field === 'date' && value) {
+        nextFilters.availableToday = false;
+        nextFilters.availableThisWeek = false;
+        nextFilters.availableNext3Days = false;
+      }
+
+      if (field === 'availableToday' && value) {
+        nextFilters.date = '';
+        nextFilters.availableThisWeek = false;
+        nextFilters.availableNext3Days = false;
+      }
+
+      if (field === 'availableThisWeek' && value) {
+        nextFilters.date = '';
+        nextFilters.availableToday = false;
+        nextFilters.availableNext3Days = false;
+      }
+
+      return nextFilters;
+    });
   }
 
   function handleApplyFilters(event) {
@@ -321,6 +376,7 @@ export default function BookAppointmentPage() {
   function handleClearFilters() {
     const nextFilters = DEFAULT_DOCTOR_FILTERS;
     setDoctorFilters(nextFilters);
+    setShowAdvancedFilters(false);
     loadDoctors(nextFilters);
   }
 
@@ -384,88 +440,110 @@ export default function BookAppointmentPage() {
                   />
                 </label>
                 <label>
-                  <span className="text-sm font-semibold text-slate-700">Sort doctors</span>
+                  <span className="text-sm font-semibold text-slate-700">Consultation Type</span>
+                  <select
+                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                    onChange={(event) => handleFilterChange('consultationType', event.target.value)}
+                    value={doctorFilters.consultationType}
+                  >
+                    <option value="">Any consultation</option>
+                    <option value="video">Video Consultation</option>
+                    <option value="in_person" disabled>In-person Consultation - Coming Soon</option>
+                  </select>
+                </label>
+                <label>
+                  <span className="text-sm font-semibold text-slate-700">Sort by</span>
                   <select
                     className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
                     onChange={(event) => handleFilterChange('sort', event.target.value)}
                     value={doctorFilters.sort}
                   >
-                    <option value="">Default</option>
-                    <option value="lowest_fee">Lowest fee</option>
-                    <option value="highest_fee">Highest fee</option>
-                    <option value="earliest_availability">Earliest availability</option>
-                    <option value="highest_rating">Highest rating</option>
+                    {SORT_OPTIONS.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
                   </select>
-                </label>
-                <label>
-                  <span className="text-sm font-semibold text-slate-700">Minimum fee</span>
-                  <input
-                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
-                    min="0"
-                    onChange={(event) => handleFilterChange('minFee', event.target.value)}
-                    placeholder="0"
-                    type="number"
-                    value={doctorFilters.minFee}
-                  />
-                </label>
-                <label>
-                  <span className="text-sm font-semibold text-slate-700">Maximum fee</span>
-                  <input
-                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
-                    min="0"
-                    onChange={(event) => handleFilterChange('maxFee', event.target.value)}
-                    placeholder="100"
-                    type="number"
-                    value={doctorFilters.maxFee}
-                  />
-                </label>
-                <label>
-                  <span className="text-sm font-semibold text-slate-700">Minimum experience</span>
-                  <input
-                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
-                    min="0"
-                    onChange={(event) => handleFilterChange('minExperience', event.target.value)}
-                    placeholder="5 years"
-                    type="number"
-                    value={doctorFilters.minExperience}
-                  />
-                </label>
-                <label>
-                  <span className="text-sm font-semibold text-slate-700">Minimum rating</span>
-                  <input
-                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
-                    max="5"
-                    min="0"
-                    onChange={(event) => handleFilterChange('minRating', event.target.value)}
-                    placeholder="4.5"
-                    step="0.1"
-                    type="number"
-                    value={doctorFilters.minRating}
-                  />
-                </label>
-                <label>
-                  <span className="text-sm font-semibold text-slate-700">Gender</span>
-                  <select
-                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
-                    onChange={(event) => handleFilterChange('gender', event.target.value)}
-                    value={doctorFilters.gender}
-                  >
-                    <option value="">Any gender</option>
-                    <option value="Female">Female</option>
-                    <option value="Male">Male</option>
-                    <option value="Other">Other</option>
-                  </select>
-                </label>
-                <label>
-                  <span className="text-sm font-semibold text-slate-700">Language</span>
-                  <input
-                    className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
-                    onChange={(event) => handleFilterChange('language', event.target.value)}
-                    placeholder="Vietnamese"
-                    value={doctorFilters.language}
-                  />
                 </label>
               </div>
+              {showAdvancedFilters ? (
+                <div className="mt-4 grid gap-4 rounded-lg border border-slate-100 bg-white/80 p-4 md:grid-cols-2 xl:grid-cols-4">
+                  <label>
+                    <span className="text-sm font-semibold text-slate-700">Minimum fee</span>
+                    <input
+                      className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                      min="0"
+                      onChange={(event) => handleFilterChange('minFee', event.target.value)}
+                      placeholder="0"
+                      type="number"
+                      value={doctorFilters.minFee}
+                    />
+                  </label>
+                  <label>
+                    <span className="text-sm font-semibold text-slate-700">Maximum fee</span>
+                    <input
+                      className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                      min="0"
+                      onChange={(event) => handleFilterChange('maxFee', event.target.value)}
+                      placeholder="100"
+                      type="number"
+                      value={doctorFilters.maxFee}
+                    />
+                  </label>
+                  <label>
+                    <span className="text-sm font-semibold text-slate-700">Minimum experience</span>
+                    <input
+                      className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                      min="0"
+                      onChange={(event) => handleFilterChange('minExperience', event.target.value)}
+                      placeholder="5 years"
+                      type="number"
+                      value={doctorFilters.minExperience}
+                    />
+                  </label>
+                  <label>
+                    <span className="text-sm font-semibold text-slate-700">Minimum rating</span>
+                    <select
+                      className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                      onChange={(event) => handleFilterChange('minRating', event.target.value)}
+                      value={doctorFilters.minRating}
+                    >
+                      {RATING_OPTIONS.map((option) => (
+                        <option key={option.value || 'any'} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    <span className="text-sm font-semibold text-slate-700">Gender</span>
+                    <select
+                      className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                      onChange={(event) => handleFilterChange('gender', event.target.value)}
+                      value={doctorFilters.gender}
+                    >
+                      <option value="">Any gender</option>
+                      <option value="Female">Female</option>
+                      <option value="Male">Male</option>
+                      <option value="Other">Other</option>
+                    </select>
+                  </label>
+                  <label>
+                    <span className="text-sm font-semibold text-slate-700">Language</span>
+                    <select
+                      className="mt-2 h-11 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none transition focus:border-medical-500 focus:ring-2 focus:ring-medical-100"
+                      onChange={(event) => handleFilterChange('language', event.target.value)}
+                      value={doctorFilters.language}
+                    >
+                      {LANGUAGE_OPTIONS.map((option) => (
+                        <option key={option.value || 'any'} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+              ) : null}
               <div className="mt-4 flex flex-wrap items-center gap-3">
                 <label className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 transition hover:border-medical-200 hover:bg-medical-50 hover:text-medical-700">
                   <input
@@ -475,15 +553,6 @@ export default function BookAppointmentPage() {
                     type="checkbox"
                   />
                   Available today
-                </label>
-                <label className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 transition hover:border-medical-200 hover:bg-medical-50 hover:text-medical-700">
-                  <input
-                    checked={doctorFilters.availableNext3Days}
-                    className="h-4 w-4 rounded border-slate-300 text-medical-600 focus:ring-medical-500"
-                    onChange={(event) => handleFilterChange('availableNext3Days', event.target.checked)}
-                    type="checkbox"
-                  />
-                  Next 3 days
                 </label>
                 <label className="inline-flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-semibold text-slate-600 transition hover:border-medical-200 hover:bg-medical-50 hover:text-medical-700">
                   <input
@@ -503,13 +572,17 @@ export default function BookAppointmentPage() {
                   />
                   Video consultation available
                 </label>
+                <Button size="sm" type="button" variant="secondary" onClick={() => setShowAdvancedFilters((current) => !current)}>
+                  <SlidersHorizontal className="h-4 w-4" aria-hidden="true" />
+                  {showAdvancedFilters ? 'Hide Filters' : 'More Filters'}
+                </Button>
                 <Button size="sm" type="submit" disabled={isLoadingDoctors}>
                   <Search className="h-4 w-4" aria-hidden="true" />
                   {isLoadingDoctors ? 'Searching doctors...' : 'Search Doctors'}
                 </Button>
                 <Button size="sm" type="button" variant="secondary" onClick={handleClearFilters} disabled={isLoadingDoctors}>
                   <Filter className="h-4 w-4" aria-hidden="true" />
-                  Clear filters
+                  Clear Filters
                 </Button>
               </div>
             </form>
@@ -519,7 +592,20 @@ export default function BookAppointmentPage() {
                   Searching available doctors...
                 </div>
               ) : availableDoctors.length === 0 ? (
-                <EmptyState title="No doctors match your filters" description="Try another specialty, fee range, or availability date." />
+                <EmptyState
+                  title="No doctors match your search criteria."
+                  description="Try a different specialty, availability date, fee range, or qualification."
+                  action={(
+                    <div className="flex flex-wrap justify-center gap-3">
+                      <Button size="sm" type="button" variant="secondary" onClick={handleClearFilters}>
+                        Clear Filters
+                      </Button>
+                      <Button size="sm" type="button" onClick={() => setShowAdvancedFilters(true)}>
+                        Adjust Search Criteria
+                      </Button>
+                    </div>
+                  )}
+                />
               ) : (
                 <div className="grid gap-3 lg:grid-cols-2">
                   {availableDoctors.map((item) => {

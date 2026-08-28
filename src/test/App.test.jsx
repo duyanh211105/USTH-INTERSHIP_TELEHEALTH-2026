@@ -5,6 +5,8 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, vi } from 'vitest';
 import App from '../App.jsx';
+import { mapAppointmentForView } from '../services/viewMappers.js';
+import { convertUtcToDisplayDateTime, getCurrentLocalDate } from '../utils/appointmentDateTime.js';
 
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 
@@ -125,15 +127,12 @@ const apiAuditLogs = [
 
 function appointmentPartsFromNow(offsetMinutes) {
   const value = new Date(Date.now() + offsetMinutes * 60 * 1000);
-  const year = value.getUTCFullYear();
-  const month = String(value.getUTCMonth() + 1).padStart(2, '0');
-  const day = String(value.getUTCDate()).padStart(2, '0');
-  const hours = String(value.getUTCHours()).padStart(2, '0');
-  const minutes = String(value.getUTCMinutes()).padStart(2, '0');
+  const display = convertUtcToDisplayDateTime(value);
 
   return {
-    scheduledDate: `${year}-${month}-${day}`,
-    scheduledTime: `${hours}:${minutes}`,
+    appointmentDateTime: value.toISOString(),
+    scheduledDate: display.localDate,
+    scheduledTime: display.localTime,
   };
 }
 
@@ -220,8 +219,69 @@ const apiRecords = [
   },
 ];
 
+const baseAiAnalysis = {
+  summary: 'Synthetic laboratory record shows values that require doctor review.',
+  medical_history: ['Type 2 diabetes history mentioned in synthetic note'],
+  medications: ['Metformin 500mg twice daily'],
+  allergies: ['No known drug allergy'],
+  key_findings: [
+    {
+      finding: 'Elevated fasting glucose',
+      source_text: 'fasting glucose: 128 mg/dL',
+    },
+  ],
+  abnormal_values: [
+    {
+      test: 'Fasting glucose',
+      value: '128 mg/dL',
+      reference_range: '70-99 mg/dL',
+      source_text: 'fasting glucose: 128 mg/dL reference 70-99 mg/dL',
+    },
+  ],
+  red_flags: [
+    {
+      finding: 'Chest pain mentioned in uploaded note',
+      source_text: 'patient reported chest pain yesterday',
+    },
+  ],
+  possible_conditions: [
+    {
+      condition: 'Possible hyperglycemia',
+      reasoning: 'The synthetic document includes glucose above the listed reference range.',
+      source_text: 'fasting glucose: 128 mg/dL',
+    },
+  ],
+  suggested_questions: ['Was the glucose test fasting?'],
+  suggested_follow_up: ['Repeat laboratory review if clinically appropriate.'],
+  missing_information: ['HbA1c value is not included.'],
+};
+
+function createAiAnalysis(overrides = {}) {
+  return {
+    id: 301,
+    recordId: 20,
+    status: 'PENDING_REVIEW',
+    aiModel: 'stealth/ox-alpha',
+    promptVersion: 'v1.0',
+    analysis: baseAiAnalysis,
+    reviewedAnalysis: null,
+    doctorNotes: '',
+    reviewedBy: null,
+    reviewedAt: null,
+    createdAt: '2026-05-17T08:00:00.000Z',
+    updatedAt: '2026-05-17T08:00:00.000Z',
+    ...overrides,
+  };
+}
+
 let apiConsultationsResponse = [];
 let apiSymptomsByPatient = {};
+let apiAiAnalyses = {};
+let apiAiGetErrors = {};
+let apiAiPostErrors = {};
+let apiAiReviewErrors = {};
+let apiAiDelayedPostRecordIds = new Set();
+let apiAiPostResolvers = {};
 
 const apiPatients = {
   1: {
@@ -275,6 +335,12 @@ describe('Telehealth frontend routes', () => {
     sessionStorage.clear();
     apiConsultationsResponse = [];
     apiSymptomsByPatient = {};
+    apiAiAnalyses = {};
+    apiAiGetErrors = {};
+    apiAiPostErrors = {};
+    apiAiReviewErrors = {};
+    apiAiDelayedPostRecordIds = new Set();
+    apiAiPostResolvers = {};
     global.fetch = vi.fn((input, options = {}) => {
       const url = String(input);
       const pathname = new URL(url, 'http://localhost:4000').pathname;
@@ -335,6 +401,8 @@ describe('Telehealth frontend routes', () => {
         const language = params.get('language');
         const availableNext3Days = params.get('availableNext3Days') === 'true';
         const availableThisWeek = params.get('availableThisWeek') === 'true';
+        const consultationType = params.get('consultationType');
+        const videoAvailable = params.get('videoAvailable') === 'true' || consultationType === 'video';
         const filteredDoctors = apiDoctors.filter((doctor) => {
           if (specialty && doctor.specialtyCode !== specialty) {
             return false;
@@ -376,13 +444,18 @@ describe('Telehealth frontend routes', () => {
             return false;
           }
 
+          if (videoAvailable && !doctor.videoConsultationAvailable) {
+            return false;
+          }
+
           return true;
         });
 
         if (
           specialty || q || minFee || maxFee || params.get('date') || availableToday
           || availableNext3Days || availableThisWeek || qualificationTitle || minExperience
-          || minRating || gender || language || params.get('videoAvailable') || params.get('sort')
+          || minRating || gender || language || params.get('videoAvailable') || consultationType
+          || params.get('sort') || params.get('page') || params.get('limit')
         ) {
           return mockApiResponse({ doctors: filteredDoctors });
         }
@@ -493,8 +566,8 @@ describe('Telehealth frontend routes', () => {
           appointmentId,
           provider: 'jitsi',
           videoRoomUrl: `https://meet.jit.si/mediconnect-appointment-${appointmentId}`,
-          availableFrom: `${appointment.scheduledDate}T${appointment.scheduledTime}:00.000Z`,
-          availableUntil: `${appointment.scheduledDate}T${appointment.scheduledTime}:00.000Z`,
+          availableFrom: appointment.appointmentDateTime || `${appointment.scheduledDate}T${appointment.scheduledTime}:00.000Z`,
+          availableUntil: appointment.appointmentDateTime || `${appointment.scheduledDate}T${appointment.scheduledTime}:00.000Z`,
         });
       }
 
@@ -561,6 +634,68 @@ describe('Telehealth frontend routes', () => {
 
       if (pathname === '/records/50' && options.method === 'DELETE') {
         return mockApiResponse({ deleted: true });
+      }
+
+      const aiAnalysisMatch = pathname.match(/^\/api\/medical-records\/(\d+)\/ai-analysis$/);
+      if (aiAnalysisMatch) {
+        const recordId = Number(aiAnalysisMatch[1]);
+
+        if (options.method === 'POST') {
+          if (apiAiPostErrors[recordId] === 'network') {
+            return Promise.reject(new TypeError('Failed to fetch'));
+          }
+
+          if (apiAiPostErrors[recordId]) {
+            return mockApiError(apiAiPostErrors[recordId].message, apiAiPostErrors[recordId].status);
+          }
+
+          if (apiAiDelayedPostRecordIds.has(recordId)) {
+            return new Promise((resolve) => {
+              apiAiPostResolvers[recordId] = () => {
+                const status = apiAiAnalyses[recordId] ? 200 : 201;
+                apiAiAnalyses[recordId] = apiAiAnalyses[recordId] || createAiAnalysis({ recordId });
+                resolve(mockApiResponse({ analysis: apiAiAnalyses[recordId] }, status));
+              };
+            });
+          }
+
+          const status = apiAiAnalyses[recordId] ? 200 : 201;
+          apiAiAnalyses[recordId] = apiAiAnalyses[recordId] || createAiAnalysis({ recordId });
+          return mockApiResponse({ analysis: apiAiAnalyses[recordId] }, status);
+        }
+
+        if (apiAiGetErrors[recordId]) {
+          return mockApiError(apiAiGetErrors[recordId].message, apiAiGetErrors[recordId].status);
+        }
+
+        if (!apiAiAnalyses[recordId]) {
+          return mockApiError('AI analysis not found', 404);
+        }
+
+        return mockApiResponse({ analysis: apiAiAnalyses[recordId] });
+      }
+
+      const aiAnalysisReviewMatch = pathname.match(/^\/api\/medical-records\/(\d+)\/ai-analysis\/review$/);
+      if (aiAnalysisReviewMatch && options.method === 'PATCH') {
+        const recordId = Number(aiAnalysisReviewMatch[1]);
+
+        if (apiAiReviewErrors[recordId]) {
+          return mockApiError(apiAiReviewErrors[recordId].message, apiAiReviewErrors[recordId].status);
+        }
+
+        const existing = apiAiAnalyses[recordId] || createAiAnalysis({ recordId });
+        const nextStatus = body.action === 'ACCEPT' ? 'ACCEPTED' : body.action === 'EDIT' ? 'EDITED' : 'REJECTED';
+        apiAiAnalyses[recordId] = {
+          ...existing,
+          status: nextStatus,
+          reviewedAnalysis: body.reviewed_analysis || null,
+          doctorNotes: body.doctor_notes || '',
+          reviewedBy: 2,
+          reviewedAt: '2026-05-17T09:00:00.000Z',
+          updatedAt: '2026-05-17T09:00:00.000Z',
+        };
+
+        return mockApiResponse({ analysis: apiAiAnalyses[recordId] });
       }
 
       if (pathname === '/symptoms') {
@@ -703,6 +838,34 @@ describe('Telehealth frontend routes', () => {
     expect(offenders).toEqual([]);
   });
 
+  it('keeps AI provider credentials and diagnosis terminology out of runtime frontend code', () => {
+    function collectSourceFiles(directory) {
+      return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+        const fullPath = path.join(directory, entry.name);
+
+        if (entry.isDirectory()) {
+          if (entry.name === 'test') {
+            return [];
+          }
+
+          return collectSourceFiles(fullPath);
+        }
+
+        return /\.(jsx|js)$/.test(entry.name) ? [fullPath] : [];
+      });
+    }
+
+    const source = collectSourceFiles(path.join(projectRoot, 'src'))
+      .map((file) => fs.readFileSync(file, 'utf8'))
+      .join('\n');
+
+    expect(source).not.toContain('OPENAI_API_KEY');
+    expect(source).not.toContain('OPENROUTER_API_KEY');
+    expect(source).not.toContain('new OpenAI');
+    expect(source).not.toContain('chat.completions');
+    expect(source).not.toMatch(/AI\s+Diagnosis/i);
+  });
+
   it('keeps shared UI components polished for interaction and responsive tables', () => {
     const buttonSource = fs.readFileSync(path.join(projectRoot, 'src/components/Button.jsx'), 'utf8');
     const tableSource = fs.readFileSync(path.join(projectRoot, 'src/components/DataTable.jsx'), 'utf8');
@@ -718,13 +881,33 @@ describe('Telehealth frontend routes', () => {
     expect(layoutSource).toContain('hover:-translate-y-0.5');
   });
 
-  it('renders the login demo role screen', () => {
+  it('formats UTC appointment datetime in Vietnam timezone without shifting selected time', () => {
+    const appointment = mapAppointmentForView({
+      id: 99,
+      patientName: 'Ava Nguyen',
+      doctorName: 'Dr. Timezone Safe',
+      appointmentDateTime: '2026-06-11T02:30:00.000Z',
+      scheduledDate: '2026-06-11',
+      scheduledTime: '09:30',
+      status: 'PENDING',
+    });
+
+    expect(appointment.date).toBe('11/06/2026');
+    expect(appointment.time).toBe('09:30');
+    expect(appointment.scheduledDate).toBe('2026-06-11');
+    expect(appointment.scheduledTime).toBe('09:30');
+  });
+
+  it('renders the login portal screen without demo labels', () => {
     renderRoute('/login');
 
     expect(screen.getByRole('heading', { name: /telehealth consultation/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /patient demo/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /doctor demo/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /admin demo/i })).toBeInTheDocument();
+    expect(screen.getByText('Telehealth Platform')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /patient portal/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /doctor portal/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /admin portal/i })).toBeInTheDocument();
+    expect(screen.getByText('Select your portal or sign in with your registered account.')).toBeInTheDocument();
+    expect(screen.queryByText(/demo/i)).not.toBeInTheDocument();
     expect(screen.getByRole('link', { name: /create patient account/i })).toHaveAttribute('href', '/register');
   });
 
@@ -764,7 +947,7 @@ describe('Telehealth frontend routes', () => {
   it('logs in through the backend API and stores the returned JWT', async () => {
     renderRoute('/login');
 
-    fireEvent.click(screen.getByRole('button', { name: /doctor demo/i }));
+    fireEvent.click(screen.getByRole('button', { name: /doctor portal/i }));
 
     expect(await screen.findByRole('heading', { name: /doctor dashboard/i })).toBeInTheDocument();
     expect(localStorage.getItem('telehealth_token')).toBe('test-token-doctor');
@@ -780,7 +963,7 @@ describe('Telehealth frontend routes', () => {
   it('loads doctors from the API and posts appointment booking requests', async () => {
     localStorage.setItem('telehealth_token', 'test-token-patient');
     renderRoute('/patient/book');
-    const todayUtc = new Date().toISOString().slice(0, 10);
+    const todayUtc = getCurrentLocalDate();
 
     expect((await screen.findAllByText(/dr\. api heart/i)).length).toBeGreaterThan(0);
     expect(await screen.findByRole('option', { name: /09:00/i })).toBeInTheDocument();
@@ -830,10 +1013,17 @@ describe('Telehealth frontend routes', () => {
     expect(screen.getByRole('combobox', { name: /qualification/i })).toBeInTheDocument();
     expect(screen.getByRole('option', { name: /specialist level ii/i })).toBeInTheDocument();
     expect(screen.getByLabelText(/available today/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/next 3 days/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/next 3 days/i)).not.toBeInTheDocument();
     expect(screen.getByLabelText(/this week/i)).toBeInTheDocument();
     expect(screen.getByLabelText(/video consultation available/i)).toBeInTheDocument();
-    expect(screen.getByRole('combobox', { name: /sort doctors/i })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /consultation type/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /in-person consultation.*coming soon/i })).toBeDisabled();
+    expect(screen.getByRole('combobox', { name: /sort by/i })).toBeInTheDocument();
+    expect(screen.getByRole('option', { name: /recommended/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /more filters/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /more filters/i }));
+    expect(screen.getByRole('combobox', { name: /minimum rating/i })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /language/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /search doctors/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /clear filters/i })).toBeInTheDocument();
     expect(screen.getAllByText(/video consultation/i).length).toBeGreaterThan(0);
@@ -851,18 +1041,18 @@ describe('Telehealth frontend routes', () => {
     fireEvent.change(screen.getByLabelText(/doctor name/i), { target: { value: 'Heart' } });
     fireEvent.change(screen.getByLabelText(/specialty/i), { target: { value: 'CARDIOLOGY' } });
     fireEvent.change(screen.getByLabelText(/qualification/i), { target: { value: 'SPECIALIST_LEVEL_II' } });
+    fireEvent.change(screen.getByLabelText(/consultation type/i), { target: { value: 'video' } });
+    fireEvent.change(screen.getByLabelText(/sort by/i), { target: { value: 'lowest_fee' } });
+    fireEvent.click(screen.getByLabelText(/available today/i));
+    fireEvent.click(screen.getByLabelText(/this week/i));
+    fireEvent.change(screen.getByLabelText(/available date/i), { target: { value: '2026-05-07' } });
+    fireEvent.click(screen.getByRole('button', { name: /more filters/i }));
     fireEvent.change(screen.getByLabelText(/minimum fee/i), { target: { value: '10' } });
     fireEvent.change(screen.getByLabelText(/maximum fee/i), { target: { value: '40' } });
     fireEvent.change(screen.getByLabelText(/minimum experience/i), { target: { value: '10' } });
     fireEvent.change(screen.getByLabelText(/minimum rating/i), { target: { value: '4.5' } });
     fireEvent.change(screen.getByLabelText(/gender/i), { target: { value: 'Male' } });
     fireEvent.change(screen.getByLabelText(/language/i), { target: { value: 'English' } });
-    fireEvent.change(screen.getByLabelText(/available date/i), { target: { value: '2026-05-07' } });
-    fireEvent.click(screen.getByLabelText(/available today/i));
-    fireEvent.click(screen.getByLabelText(/next 3 days/i));
-    fireEvent.click(screen.getByLabelText(/this week/i));
-    fireEvent.click(screen.getByLabelText(/video consultation available/i));
-    fireEvent.change(screen.getByLabelText(/sort doctors/i), { target: { value: 'lowest_fee' } });
     fireEvent.click(screen.getByRole('button', { name: /search doctors/i }));
 
     await waitFor(() => {
@@ -879,10 +1069,10 @@ describe('Telehealth frontend routes', () => {
           && value.includes('gender=Male')
           && value.includes('language=English')
           && value.includes('date=2026-05-07')
-          && value.includes('availableToday=true')
-          && value.includes('availableNext3Days=true')
-          && value.includes('availableThisWeek=true')
-          && value.includes('videoAvailable=true')
+          && !value.includes('availableToday=true')
+          && !value.includes('availableNext3Days=true')
+          && !value.includes('availableThisWeek=true')
+          && value.includes('consultationType=video')
           && value.includes('sort=lowest_fee');
       });
       expect(doctorFilterCall).toBeTruthy();
@@ -898,9 +1088,10 @@ describe('Telehealth frontend routes', () => {
     fireEvent.change(screen.getByLabelText(/doctor name/i), { target: { value: 'No Match Provider' } });
     fireEvent.click(screen.getByRole('button', { name: /search doctors/i }));
 
-    expect(await screen.findByText(/no doctors match your filters/i)).toBeInTheDocument();
+    expect(await screen.findByText(/no doctors match your search criteria\./i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /adjust search criteria/i })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: /clear filters/i }));
+    fireEvent.click(screen.getAllByRole('button', { name: /clear filters/i })[0]);
     expect(screen.getByLabelText(/doctor name/i)).toHaveValue('');
     expect(screen.getByLabelText(/specialty/i)).toHaveValue('');
   });
@@ -1182,6 +1373,166 @@ describe('Telehealth frontend routes', () => {
     expect(screen.getByRole('link', { name: /open chest-xray\.png/i })).toHaveAttribute('href', 'http://localhost:4000/uploads/chest-xray.png');
     expect(screen.getByRole('link', { name: /open blood-test\.pdf/i })).toHaveAttribute('href', 'http://localhost:4000/uploads/blood-test.pdf');
     await waitFor(() => expect(fetch).toHaveBeenCalledWith(expect.stringContaining('/records'), expect.any(Object)));
+  });
+
+  it('shows no AI analysis state and generates structured analysis without duplicate requests', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiDelayedPostRecordIds.add(20);
+    renderRoute('/doctor/patients/1');
+
+    expect(await screen.findByText(/ai analysis has not been generated for this record/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /analyze with ai/i }));
+    const loadingButton = await screen.findByRole('button', { name: /generating ai analysis/i });
+    expect(loadingButton).toBeDisabled();
+    fireEvent.click(loadingButton);
+
+    apiAiPostResolvers[20]();
+
+    expect(await screen.findByText(/synthetic laboratory record shows values/i)).toBeInTheDocument();
+    expect(screen.getByText(/pending doctor review/i)).toBeInTheDocument();
+    expect(screen.getByText(/possible conditions — for doctor review/i)).toBeInTheDocument();
+    expect(screen.getByText(/source: fasting glucose: 128 mg\/dl/i)).toBeInTheDocument();
+    expect(screen.queryByText(/ai diagnosis/i)).not.toBeInTheDocument();
+
+    await waitFor(() => {
+      const aiPosts = fetch.mock.calls.filter(([url, options]) => String(url).includes('/api/medical-records/20/ai-analysis') && options?.method === 'POST');
+      expect(aiPosts).toHaveLength(1);
+    });
+  });
+
+  it('loads an existing AI analysis and accepts it with doctor notes through the review API', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiAnalyses[20] = createAiAnalysis();
+    renderRoute('/doctor/patients/1');
+
+    expect(await screen.findByText(/ai-assisted medical record analysis/i)).toBeInTheDocument();
+    expect(await screen.findByText(/synthetic laboratory record shows values/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/doctor notes/i), { target: { value: 'Accepted for clinician reference.' } });
+    fireEvent.click(screen.getByRole('button', { name: /^accept$/i }));
+    expect(await screen.findByRole('heading', { name: /accept ai-assisted analysis/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /accept analysis/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/medical-records/20/ai-analysis/review'),
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({
+            action: 'ACCEPT',
+            doctor_notes: 'Accepted for clinician reference.',
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText(/accepted by doctor/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^accept$/i })).not.toBeInTheDocument();
+  });
+
+  it('opens a human-readable edit form, validates input, and sends structured reviewed analysis', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiAnalyses[20] = createAiAnalysis();
+    renderRoute('/doctor/patients/1');
+
+    expect(await screen.findByText(/synthetic laboratory record shows values/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    expect(await screen.findByRole('heading', { name: /edit ai-assisted analysis/i })).toBeInTheDocument();
+    expect(screen.getByLabelText(/clinical summary/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/medical history/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/possible condition 1/i)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/raw json/i)).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/clinical summary/i), { target: { value: '' } });
+    fireEvent.click(screen.getByRole('button', { name: /save edited analysis/i }));
+    expect(await screen.findByText(/clinical summary is required/i)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/clinical summary/i), { target: { value: 'Doctor-reviewed synthetic summary.' } });
+    fireEvent.change(screen.getByLabelText(/doctor notes for edit/i), { target: { value: 'Edited summary wording.' } });
+    fireEvent.click(screen.getByRole('button', { name: /save edited analysis/i }));
+
+    await waitFor(() => {
+      const editCall = fetch.mock.calls.find(([url, options]) => String(url).includes('/api/medical-records/20/ai-analysis/review') && options?.method === 'PATCH');
+      expect(editCall).toBeTruthy();
+      const body = JSON.parse(editCall[1].body);
+      expect(body.action).toBe('EDIT');
+      expect(body.doctor_notes).toBe('Edited summary wording.');
+      expect(body.reviewed_analysis.summary).toBe('Doctor-reviewed synthetic summary.');
+      expect(body.reviewed_analysis.possible_conditions[0].condition).toBe('Possible hyperglycemia');
+    });
+
+    expect(await screen.findByText(/edited by doctor/i)).toBeInTheDocument();
+    expect(screen.getByText(/original ai analysis/i)).toBeInTheDocument();
+    expect(screen.getByText(/doctor-reviewed version/i)).toBeInTheDocument();
+  });
+
+  it('preserves the edit form when backend validation returns 400', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiAnalyses[20] = createAiAnalysis();
+    apiAiReviewErrors[20] = { message: 'reviewed_analysis must match the medical analysis schema', status: 400 };
+    renderRoute('/doctor/patients/1');
+
+    expect(await screen.findByText(/synthetic laboratory record shows values/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^edit$/i }));
+    fireEvent.change(await screen.findByLabelText(/clinical summary/i), { target: { value: 'Unsaved doctor summary.' } });
+    fireEvent.click(screen.getByRole('button', { name: /save edited analysis/i }));
+
+    expect(await screen.findByText(/please check the edited analysis and try again/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/clinical summary/i)).toHaveValue('Unsaved doctor summary.');
+  });
+
+  it('rejects AI analysis with confirmation and doctor notes without deleting the analysis', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiAnalyses[20] = createAiAnalysis();
+    renderRoute('/doctor/patients/1');
+
+    expect(await screen.findByText(/synthetic laboratory record shows values/i)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText(/doctor notes/i), { target: { value: 'Source support is insufficient.' } });
+    fireEvent.click(screen.getByRole('button', { name: /^reject$/i }));
+    expect(await screen.findByRole('heading', { name: /reject ai-assisted analysis/i })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /reject analysis/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        expect.stringContaining('/api/medical-records/20/ai-analysis/review'),
+        expect.objectContaining({
+          method: 'PATCH',
+          body: JSON.stringify({
+            action: 'REJECT',
+            doctor_notes: 'Source support is insufficient.',
+          }),
+        }),
+      );
+    });
+    expect(await screen.findByText(/rejected by doctor/i)).toBeInTheDocument();
+    expect(screen.getByText(/synthetic laboratory record shows values/i)).toBeInTheDocument();
+  });
+
+  it('handles AI analysis authorization, missing analysis, invalid state, and network failures safely', async () => {
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiGetErrors[20] = { message: 'Forbidden', status: 403 };
+    const forbiddenView = renderRoute('/doctor/patients/1');
+
+    expect(await screen.findByText(/you are not authorized to view this analysis/i)).toBeInTheDocument();
+    expect(screen.queryByText(/synthetic laboratory record shows values/i)).not.toBeInTheDocument();
+    forbiddenView.unmount();
+
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiGetErrors = {};
+    apiAiPostErrors[20] = 'network';
+    const networkView = renderRoute('/doctor/patients/1');
+    expect(await screen.findByText(/ai analysis has not been generated for this record/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /analyze with ai/i }));
+    expect(await screen.findByText(/ai analysis could not be completed/i)).toBeInTheDocument();
+    networkView.unmount();
+
+    localStorage.setItem('telehealth_token', 'test-token-doctor');
+    apiAiPostErrors = {};
+    apiAiAnalyses[20] = createAiAnalysis();
+    apiAiReviewErrors[20] = { message: 'AI analysis has already been reviewed', status: 409 };
+    renderRoute('/doctor/patients/1');
+    expect(await screen.findByText(/synthetic laboratory record shows values/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^accept$/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /accept analysis/i }));
+    expect(await screen.findByText(/this analysis has already been reviewed and cannot be changed/i)).toBeInTheDocument();
   });
 
   it('loads the selected doctor patient detail from the route patient id', async () => {

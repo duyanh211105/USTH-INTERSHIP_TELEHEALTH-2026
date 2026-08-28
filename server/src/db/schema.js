@@ -1,6 +1,8 @@
 import { getDatabase } from './connection.js';
+import { normalizeLocalAppointmentDateTime } from '../utils/appointmentDateTime.js';
 
 const userRoleCheckSql = "role IN ('patient', 'doctor', 'department_head', 'hospital_director', 'admin')";
+const medicalRecordAnalysisStatusCheckSql = "status IN ('PENDING_REVIEW', 'ACCEPTED', 'EDITED', 'REJECTED')";
 
 async function columnExists(db, table, column) {
   if (db.client === 'postgres') {
@@ -193,6 +195,7 @@ async function migrateAppointmentStatusConstraint(db) {
       doctor_id INTEGER NOT NULL,
       scheduled_date TEXT NOT NULL,
       scheduled_time TEXT NOT NULL,
+      appointment_datetime TEXT NOT NULL,
       reason TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED')),
       cancellation_reason TEXT NOT NULL DEFAULT '',
@@ -207,11 +210,11 @@ async function migrateAppointmentStatusConstraint(db) {
     );
 
     INSERT INTO appointments_next (
-      id, patient_id, doctor_id, scheduled_date, scheduled_time, reason, status,
+      id, patient_id, doctor_id, scheduled_date, scheduled_time, appointment_datetime, reason, status,
       cancellation_reason, cancelled_by, cancelled_at, video_room_url, video_room_provider, created_at
     )
     SELECT
-      id, patient_id, doctor_id, scheduled_date, scheduled_time, reason, status,
+      id, patient_id, doctor_id, scheduled_date, scheduled_time, appointment_datetime, reason, status,
       cancellation_reason, cancelled_by, cancelled_at, video_room_url, video_room_provider, created_at
     FROM appointments;
 
@@ -236,6 +239,25 @@ async function migrateDuplicateConsultationNotes(db) {
     .run();
 }
 
+async function migrateAppointmentDateTime(db) {
+  await addColumnIfMissing(db, 'appointments', 'appointment_datetime', db.client === 'postgres' ? 'TIMESTAMPTZ' : 'TEXT');
+
+  const rows = await db
+    .prepare(`
+      SELECT id, scheduled_date, scheduled_time
+      FROM appointments
+      WHERE appointment_datetime IS NULL
+    `)
+    .all();
+
+  const update = db.prepare('UPDATE appointments SET appointment_datetime = ? WHERE id = ?');
+
+  for (const row of rows) {
+    const normalized = normalizeLocalAppointmentDateTime(row.scheduled_date, row.scheduled_time);
+    await update.run(normalized.utcDateTime, row.id);
+  }
+}
+
 async function migrateExistingSchema(db) {
   await migrateUserStatusConstraint(db);
   await migrateUserRoleConstraint(db);
@@ -256,6 +278,7 @@ async function migrateExistingSchema(db) {
   await addColumnIfMissing(db, 'appointments', 'cancelled_at', db.client === 'postgres' ? 'TIMESTAMPTZ' : 'TEXT');
   await addColumnIfMissing(db, 'appointments', 'video_room_url', 'TEXT');
   await addColumnIfMissing(db, 'appointments', 'video_room_provider', 'TEXT');
+  await migrateAppointmentDateTime(db);
   await migrateAppointmentStatusConstraint(db);
   await addColumnIfMissing(db, 'leave_requests', 'department_id', "TEXT NOT NULL DEFAULT ''");
   await addColumnIfMissing(db, 'leave_requests', 'rejection_reason', "TEXT NOT NULL DEFAULT ''");
@@ -361,6 +384,7 @@ function sqliteSchemaSql() {
       doctor_id INTEGER NOT NULL,
       scheduled_date TEXT NOT NULL,
       scheduled_time TEXT NOT NULL,
+      appointment_datetime TEXT NOT NULL,
       reason TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED')),
       cancellation_reason TEXT NOT NULL DEFAULT '',
@@ -517,6 +541,8 @@ function sqliteSchemaSql() {
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (actor_user_id) REFERENCES users(id) ON DELETE SET NULL
     );
+
+    ${medicalRecordAnalysesSchemaSql('sqlite')}
   `;
 }
 
@@ -559,6 +585,7 @@ export function postgresSchemaSql() {
       doctor_id BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       scheduled_date DATE NOT NULL,
       scheduled_time TIME NOT NULL,
+      appointment_datetime TIMESTAMPTZ NOT NULL,
       reason TEXT NOT NULL,
       status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING', 'CONFIRMED', 'COMPLETED', 'CANCELLED', 'RESCHEDULE_REQUIRED')),
       cancellation_reason TEXT NOT NULL DEFAULT '',
@@ -694,6 +721,61 @@ export function postgresSchemaSql() {
       ip_address TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     );
+
+    ${medicalRecordAnalysesSchemaSql('postgres')}
+  `;
+}
+
+function medicalRecordAnalysesSchemaSql(client) {
+  if (client === 'postgres') {
+    return `
+      CREATE TABLE IF NOT EXISTS medical_record_analyses (
+        id BIGSERIAL PRIMARY KEY,
+        record_id BIGINT NOT NULL REFERENCES medical_records(id) ON DELETE CASCADE,
+        status TEXT NOT NULL DEFAULT 'PENDING_REVIEW' CHECK (${medicalRecordAnalysisStatusCheckSql}),
+        ai_model TEXT NOT NULL,
+        prompt_version TEXT NOT NULL DEFAULT 'v1.0',
+        analysis_json JSONB NOT NULL,
+        reviewed_analysis_json JSONB,
+        doctor_notes TEXT,
+        reviewed_by BIGINT REFERENCES users(id) ON DELETE SET NULL,
+        reviewed_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+    `;
+  }
+
+  return `
+    CREATE TABLE IF NOT EXISTS medical_record_analyses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      record_id INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING_REVIEW' CHECK (${medicalRecordAnalysisStatusCheckSql}),
+      ai_model TEXT NOT NULL,
+      prompt_version TEXT NOT NULL DEFAULT 'v1.0',
+      analysis_json TEXT NOT NULL,
+      reviewed_analysis_json TEXT,
+      doctor_notes TEXT,
+      reviewed_by INTEGER,
+      reviewed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (record_id) REFERENCES medical_records(id) ON DELETE CASCADE,
+      FOREIGN KEY (reviewed_by) REFERENCES users(id) ON DELETE SET NULL
+    );
+  `;
+}
+
+function medicalRecordAnalysesIndexSql() {
+  return `
+    CREATE INDEX IF NOT EXISTS idx_medical_record_analyses_record_status
+    ON medical_record_analyses(record_id, status);
+
+    CREATE INDEX IF NOT EXISTS idx_medical_record_analyses_record_created
+    ON medical_record_analyses(record_id, created_at DESC, id DESC);
+
+    CREATE INDEX IF NOT EXISTS idx_medical_record_analyses_reviewed_by
+    ON medical_record_analyses(reviewed_by);
   `;
 }
 
@@ -719,11 +801,23 @@ function indexAndCompatibilitySql() {
     CREATE INDEX IF NOT EXISTS idx_doctor_reviews_doctor_id
     ON doctor_reviews(doctor_id);
 
-    CREATE INDEX IF NOT EXISTS idx_appointments_patient_datetime_status
-    ON appointments(patient_id, scheduled_date, scheduled_time, status);
+    CREATE INDEX IF NOT EXISTS idx_doctor_profiles_specialty
+    ON doctor_profiles(specialty);
 
-    CREATE INDEX IF NOT EXISTS idx_appointments_doctor_datetime_status
-    ON appointments(doctor_id, scheduled_date, scheduled_time, status);
+    CREATE INDEX IF NOT EXISTS idx_doctor_profiles_qualification
+    ON doctor_profiles(qualification_title);
+
+    CREATE INDEX IF NOT EXISTS idx_doctor_profiles_experience_rating
+    ON doctor_profiles(years_of_experience, average_rating);
+
+    CREATE INDEX IF NOT EXISTS idx_doctor_profiles_review_count
+    ON doctor_profiles(review_count);
+
+    CREATE INDEX IF NOT EXISTS idx_appointments_patient_utc_status
+    ON appointments(patient_id, appointment_datetime, status);
+
+    CREATE INDEX IF NOT EXISTS idx_appointments_doctor_utc_status
+    ON appointments(doctor_id, appointment_datetime, status);
 
     CREATE INDEX IF NOT EXISTS idx_leave_requests_doctor_date_status
     ON leave_requests(doctor_id, date, status);
@@ -740,6 +834,8 @@ function indexAndCompatibilitySql() {
     CREATE INDEX IF NOT EXISTS idx_audit_logs_action_role
     ON audit_logs(action, actor_role);
 
+    ${medicalRecordAnalysesIndexSql()}
+
     INSERT INTO doctor_schedules (doctor_id, weekday, start_time, end_time, slot_duration)
     SELECT doctor_id, weekday, start_time, end_time, slot_duration
     FROM doctor_availability legacy
@@ -753,6 +849,15 @@ function indexAndCompatibilitySql() {
         AND schedules.slot_duration = legacy.slot_duration
     );
   `;
+}
+
+export async function initializeMedicalRecordAnalysesSchema(db = getDatabase()) {
+  await db.exec(medicalRecordAnalysesSchemaSql(db.client));
+  await db.exec(medicalRecordAnalysesIndexSql());
+}
+
+export async function dropMedicalRecordAnalysesSchema(db = getDatabase()) {
+  await db.exec('DROP TABLE IF EXISTS medical_record_analyses;');
 }
 
 export async function initializeDatabase() {

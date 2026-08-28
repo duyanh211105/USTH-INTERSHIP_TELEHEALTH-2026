@@ -7,7 +7,7 @@ MediConnect is a full-stack MVP for remote healthcare consultation, appointment 
 ### Patient
 - Register and log in with real database accounts.
 - Use a rule-based symptom chatbot to collect structured symptom summaries.
-- Search doctors with normalized specialty filters, name keyword search, fee range, availability date, available-today, video availability, and sorting.
+- Search doctors with normalized specialty filters, qualification/title, rating, language, fee range, availability date, available-today/week filters, video consultation support, and backend recommendation sorting.
 - Book appointments from generated available doctor slots.
 - Upload medical documents as PDF, JPG, or PNG.
 - Preview uploaded images and open/download PDFs.
@@ -299,13 +299,21 @@ Main API groups:
 | --- | --- |
 | `q` | Case-insensitive partial search across doctor name and specialty. |
 | `specialty` | Normalized specialty code such as `CARDIOLOGY`, `PEDIATRICS`, or `GENERAL_MEDICINE`. |
+| `qualificationTitle` | Filter by controlled doctor qualification/title values. |
 | `date` | Return doctors with generated available slots on that date. |
 | `availableToday` | Return doctors with available slots today. |
+| `availableThisWeek` | Return doctors with generated slots within the current seven-day window. |
 | `minFee` / `maxFee` | Filter by consultation fee range when provided. |
+| `minExperience` | Filter by minimum years of experience. |
+| `minRating` | Supports controlled thresholds such as `4`, `4.5`, and `4.8`. |
+| `gender` | Optional exact gender filter when profile data exists. |
+| `language` | Supports controlled language values: Vietnamese, English, Japanese, Korean, and Chinese. |
 | `videoAvailable` | Keep doctors compatible with the MVP video consultation workflow. |
-| `sort` | Supports `lowest_fee`, `highest_fee`, `earliest_availability`, and `highest_rating`. |
+| `consultationType` | Supports `video`; in-person consultation is reserved for a future workflow. |
+| `sort` | Supports `recommended`, `highest_rating`, `most_experienced`, `earliest_availability`, `lowest_fee`, `highest_fee`, and `most_reviewed`. |
+| `page` / `limit` | Lightweight pagination for doctor discovery responses. |
 
-Specialties are controlled in the UI and normalized in the backend. Legacy values such as `heart`, `Heart Doctor`, or `tim` map to `CARDIOLOGY`, which keeps filtering reliable without requiring a separate specialties table yet.
+Specialties are controlled in the UI and normalized in the backend. Legacy values such as `heart`, `Heart Doctor`, or `tim` map to `CARDIOLOGY`, which keeps filtering reliable without requiring a separate specialties table yet. The default `recommended` sort is calculated on the backend from cached average rating, real availability, years of experience, and review count.
 
 ## Screenshots and Demo
 

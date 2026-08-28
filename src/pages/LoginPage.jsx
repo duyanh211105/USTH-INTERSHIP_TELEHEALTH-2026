@@ -5,9 +5,9 @@ import Button from '../components/Button.jsx';
 import { login } from '../services/telehealthApi.js';
 
 const demoRoles = [
-  { label: 'Patient Demo', phone: '0900000001', icon: UserRound, color: 'bg-medical-50 text-medical-700' },
-  { label: 'Doctor Demo', phone: '0900000002', icon: Stethoscope, color: 'bg-mint-50 text-mint-600' },
-  { label: 'Admin Demo', phone: '0123456789', icon: ShieldCheck, color: 'bg-amber-50 text-amber-700' },
+  { label: 'Patient Portal', phone: '0900000001', icon: UserRound, color: 'bg-medical-50 text-medical-700' },
+  { label: 'Doctor Portal', phone: '0900000002', icon: Stethoscope, color: 'bg-mint-50 text-mint-600' },
+  { label: 'Admin Portal', phone: '0123456789', icon: ShieldCheck, color: 'bg-amber-50 text-amber-700' },
 ];
 
 const routeByRole = {
@@ -49,7 +49,7 @@ export default function LoginPage() {
             </div>
             <div>
               <p className="text-lg font-bold text-slate-950">MediConnect</p>
-              <p className="text-sm text-slate-500">Frontend demo</p>
+              <p className="text-sm text-slate-500">Telehealth Platform</p>
             </div>
           </div>
 
@@ -87,7 +87,7 @@ export default function LoginPage() {
 
         <section className="rounded-lg border border-slate-100 bg-white p-6 shadow-soft sm:p-8">
           <h2 className="text-xl font-bold text-slate-950">Sign in</h2>
-          <p className="mt-2 text-sm text-slate-500">Use a demo role or sign in with a registered account.</p>
+          <p className="mt-2 text-sm text-slate-500">Select your portal or sign in with your registered account.</p>
 
           <form
             className="mt-6 space-y-4"

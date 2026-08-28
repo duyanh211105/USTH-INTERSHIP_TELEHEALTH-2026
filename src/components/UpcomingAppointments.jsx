@@ -5,6 +5,7 @@ import Card, { CardBody, CardHeader } from './Card.jsx';
 import EmptyState from './EmptyState.jsx';
 import StatusBadge from './StatusBadge.jsx';
 import VideoCallButton, { getVideoCallWindowState } from './VideoCallButton.jsx';
+import { convertUtcToDisplayDateTime, parseLocalAppointmentDateTime } from '../utils/appointmentDateTime.js';
 
 function toAppointmentDateTime(appointment) {
   const date = appointment.appointmentDate || appointment.scheduledDate;
@@ -14,41 +15,44 @@ function toAppointmentDateTime(appointment) {
     return null;
   }
 
-  const value = new Date(`${String(date).slice(0, 10)}T${String(time).slice(0, 5)}:00Z`);
-  return Number.isNaN(value.getTime()) ? null : value;
+  return parseLocalAppointmentDateTime(String(date).slice(0, 10), String(time).slice(0, 5));
 }
 
 function formatLocalDate(appointment) {
+  const display = appointment.appointmentDateTime ? convertUtcToDisplayDateTime(appointment.appointmentDateTime) : null;
+  if (display) {
+    return display.date;
+  }
+
   const value = toAppointmentDateTime(appointment);
 
   if (!value) {
     return appointment.appointmentDate || appointment.scheduledDate || 'Date pending';
   }
 
-  return new Intl.DateTimeFormat('en-US', {
-    month: 'short',
-    day: 'numeric',
-    year: 'numeric',
-  }).format(value);
+  return convertUtcToDisplayDateTime(value)?.date || appointment.appointmentDate || appointment.scheduledDate || 'Date pending';
 }
 
 function formatLocalTime(appointment) {
+  const display = appointment.appointmentDateTime ? convertUtcToDisplayDateTime(appointment.appointmentDateTime) : null;
+  if (display) {
+    return display.time;
+  }
+
   const value = toAppointmentDateTime(appointment);
 
   if (!value) {
     return appointment.appointmentTime || appointment.scheduledTime || 'Time pending';
   }
 
-  return new Intl.DateTimeFormat('en-US', {
-    hour: 'numeric',
-    minute: '2-digit',
-  }).format(value);
+  return convertUtcToDisplayDateTime(value)?.time || appointment.appointmentTime || appointment.scheduledTime || 'Time pending';
 }
 
 function normalizeAppointment(appointment) {
   return {
     ...appointment,
     id: appointment.id || appointment.appointmentId,
+    appointmentDateTime: appointment.appointmentDateTime,
     scheduledDate: appointment.scheduledDate || appointment.appointmentDate,
     scheduledTime: appointment.scheduledTime || appointment.appointmentTime,
   };
